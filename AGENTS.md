@@ -13,7 +13,7 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `cmd/agent/` — agent entry point. Directory name is fixed by CI.
 - `internal/` — everything the two binaries share. A `main` package cannot be imported,
   so any code used by both lives here.
-- `internal/models/` — domain types. No business logic.
+- `internal/models/` — domain types once there are any. No business logic.
 
 Do not create a directory before something goes in it. Git does not track empty
 directories, and an empty package is noise.
