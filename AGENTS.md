@@ -72,8 +72,9 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 - Comments carry a load-bearing why — an ordering that looks wrong but isn't, a decision
   a reader would otherwise reverse. A comment that restates the code gets deleted. Every
   package keeps its one-line package comment.
-- Table-driven tests next to the code as `*_test.go`, named
-  `Test<Function>_<Scenario>_<Expected>`.
+- Table-driven tests next to the code as `*_test.go`. The function is named
+  `Test<Type>_<Method>_<Expected>`; each case states its own scenario in the subtest name.
+  A test file uses the external `<pkg>_test` package unless it needs unexported state.
 - Package name equals directory name.
 - Handle every edge and negative case the increment describes; the autotests tighten each
   sprint.
