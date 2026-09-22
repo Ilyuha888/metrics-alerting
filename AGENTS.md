@@ -39,8 +39,18 @@ Two workflows, both triggered by any pull request and by pushes to `main`.
   whose name does not match `iter<number>`, unless the ref is `main`. Increment N's tests
   run on branches `iterN` and above, so later branches re-run every earlier increment.
 
-The autotest binaries take `-binary-path=cmd/server/server` and
-`-agent-binary-path=cmd/agent/agent`. Those paths are not negotiable.
+There are 14 increments, so branches run `iter1` through `iter14`. What each step feeds
+`metricstest` constrains the code:
+
+- `-binary-path=cmd/server/server`, `-agent-binary-path=cmd/agent/agent` — fixed paths.
+- `-server-port` from increment 4 on, a random free port per step. A hardcoded `:8080`
+  passes increments 1-3 and fails from 4 onward.
+- `-source-path=.` from increment 2 on — some checks read the source tree, not just the
+  running binary.
+- `-file-storage-path` at increment 9, `-database-dsn` against the job's Postgres service
+  from increment 10 on, `-key` at increment 14.
+- Increment 14 also runs `go test -v -race ./...`, so the repo's own tests must exist and
+  be race-clean by then.
 
 Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 
