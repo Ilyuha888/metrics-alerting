@@ -52,8 +52,8 @@ func update(s Storage) http.HandlerFunc {
 	}
 }
 
-// rejectUncleanPath answers 404 where ServeMux would redirect: the increment states
-// that redirects are not supported.
+// rejectUncleanPath answers 404 where ServeMux would redirect: the spec states that
+// redirects are not supported.
 func rejectUncleanPath(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if path.Clean(r.URL.Path) != r.URL.Path {
