@@ -69,12 +69,22 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 - Keep `main` thin: parse flags, build dependencies, call `run() error`. `os.Exit` skips
   deferred calls, so it belongs in `main` and nowhere deeper.
 - Errors are returned, not panicked, and wrapped with `fmt.Errorf("...: %w", err)`.
-- Every exported identifier has a doc comment. Comments explain why, not what.
+- Comments carry a load-bearing why — an ordering that looks wrong but isn't, a decision
+  a reader would otherwise reverse. A comment that restates the code gets deleted. Every
+  package keeps its one-line package comment.
 - Table-driven tests next to the code as `*_test.go`, named
   `Test<Function>_<Scenario>_<Expected>`.
 - Package name equals directory name.
 - Handle every edge and negative case the increment describes; the autotests tighten each
   sprint.
+
+## Known debt
+
+- `MemStorage` has no lock, so concurrent reports race and crash the process with
+  `concurrent map writes`. Deliberate: the mutex lands in the sprint that teaches it.
+  Increment 14 runs `go test -race`, so it has to be gone by then.
+- The listen address is hardcoded. Increment 4 hands the server a random port, so it moves
+  behind a flag there.
 
 ## Updating the template
 
