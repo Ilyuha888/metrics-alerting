@@ -13,7 +13,11 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `cmd/agent/` — agent entry point. Directory name is fixed by CI.
 - `internal/` — everything the two binaries share. A `main` package cannot be imported,
   so any code used by both lives here.
-- `internal/models/` — domain types once there are any. No business logic.
+- `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `ErrNotFound`.
+  Both storage and handler import it, so neither has to import the other.
+- `internal/storage/` — `MemStorage`.
+- `internal/handler/` — the HTTP layer on chi. It declares the `Storage` interface it needs.
+- `internal/agent/` — collector, sender and the polling loop.
 
 Do not create a directory before something goes in it. Git does not track empty
 directories, and an empty package is noise.
@@ -81,8 +85,8 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 
 ## Known debt
 
-- `MemStorage` has no lock, so concurrent reports race and crash the process with
-  `concurrent map writes`. Deliberate: the mutex lands in the sprint that teaches it.
+- `MemStorage` has no lock, so concurrent requests — two reports, or a report and a read —
+  race and crash the process with a `concurrent map` fatal error. Deliberate: the mutex lands in the sprint that teaches it.
   Increment 14 runs `go test -race`, so it has to be gone by then.
 - The listen address is hardcoded. Increment 4 hands the server a random port, so it moves
   behind a flag there.

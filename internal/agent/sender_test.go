@@ -16,21 +16,27 @@ type recorded struct {
 	contentType string
 }
 
-// recordingServer answers every request with status and records what arrived. The slice
-// needs no guard: Send waits for each response before sending the next request, so the
-// handler never runs twice at once.
-func recordingServer(t *testing.T, status int) (*Sender, func() []recorded) {
+// recorder answers every request with status and records what arrived. The slice needs
+// no guard: Send waits for each response before sending the next request.
+type recorder struct {
+	status int
+	got    []recorded
+}
+
+func (rec *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	rec.got = append(rec.got, recorded{r.Method, r.URL.Path, r.Header.Get("Content-Type")})
+	w.WriteHeader(rec.status)
+}
+
+// recordingServer starts a recorder behind a real HTTP server and points a Sender at it.
+func recordingServer(t *testing.T, status int) (*Sender, *recorder) {
 	t.Helper()
 
-	var got []recorded
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = append(got, recorded{r.Method, r.URL.Path, r.Header.Get("Content-Type")})
-		w.WriteHeader(status)
-	}))
+	rec := &recorder{status: status}
+	srv := httptest.NewServer(rec)
 	t.Cleanup(srv.Close)
 
-	return NewSender(srv.URL), func() []recorded { return got }
+	return NewSender(srv.URL), rec
 }
 
 func TestSender_Send_BuildsTheRequestTheSpecDescribes(t *testing.T) {
@@ -57,11 +63,11 @@ func TestSender_Send_BuildsTheRequestTheSpecDescribes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sender, calls := recordingServer(t, http.StatusOK)
+			sender, rec := recordingServer(t, http.StatusOK)
 
 			require.NoError(t, sender.Send(tt.snap))
 
-			got := calls()
+			got := rec.got
 			require.Len(t, got, 2) // gauge + PollCount
 			assert.Equal(t, tt.wantPath, got[0].path)
 			assert.Equal(t, http.MethodPost, got[0].method)
@@ -71,16 +77,16 @@ func TestSender_Send_BuildsTheRequestTheSpecDescribes(t *testing.T) {
 }
 
 func TestSender_Send_AlwaysReportsPollCount(t *testing.T) {
-	sender, calls := recordingServer(t, http.StatusOK)
+	sender, rec := recordingServer(t, http.StatusOK)
 
 	require.NoError(t, sender.Send(Snapshot{PollCount: 5}))
 
-	require.Len(t, calls(), 1)
-	assert.Equal(t, "/update/counter/PollCount/5", calls()[0].path)
+	require.Len(t, rec.got, 1)
+	assert.Equal(t, "/update/counter/PollCount/5", rec.got[0].path)
 }
 
 func TestSender_Send_DeliversTheRestAfterAFailure(t *testing.T) {
-	sender, calls := recordingServer(t, http.StatusInternalServerError)
+	sender, rec := recordingServer(t, http.StatusInternalServerError)
 	snap := Snapshot{
 		Gauges:    map[string]metrics.Gauge{"a": 1, "b": 2, "c": 3},
 		PollCount: 1,
@@ -89,16 +95,16 @@ func TestSender_Send_DeliversTheRestAfterAFailure(t *testing.T) {
 	err := sender.Send(snap)
 
 	require.Error(t, err)
-	assert.Len(t, calls(), 4, "every metric is attempted even though all of them fail")
+	assert.Len(t, rec.got, 4, "every metric is attempted even though all of them fail")
 	assert.Contains(t, err.Error(), "4 of 4 metrics failed")
 }
 
 func TestSender_Send_UnreachableServerIsAnError(t *testing.T) {
-	sender, calls := recordingServer(t, http.StatusOK)
+	sender, rec := recordingServer(t, http.StatusOK)
 	sender.endpoint = "http://127.0.0.1:1" // nothing listens here
 
 	err := sender.Send(Snapshot{PollCount: 1})
 
 	require.Error(t, err)
-	assert.Empty(t, calls())
+	assert.Empty(t, rec.got)
 }

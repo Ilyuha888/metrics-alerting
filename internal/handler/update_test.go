@@ -1,5 +1,3 @@
-// External test package: reach only what a real caller can, so everything goes through
-// NewRouter.
 package handler_test
 
 import (
@@ -12,23 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type call struct {
-	kind  metrics.Kind
-	name  string
-	gauge metrics.Gauge
-	count metrics.Counter
-}
-
-type spyStorage struct{ calls []call }
-
-func (s *spyStorage) SetGauge(name string, v metrics.Gauge) {
-	s.calls = append(s.calls, call{kind: metrics.KindGauge, name: name, gauge: v})
-}
-
-func (s *spyStorage) AddCounter(name string, v metrics.Counter) {
-	s.calls = append(s.calls, call{kind: metrics.KindCounter, name: name, count: v})
-}
 
 func TestRouter_Update(t *testing.T) {
 	tests := []struct {
@@ -70,6 +51,35 @@ func TestRouter_Update(t *testing.T) {
 			wantCode: http.StatusNotFound,
 		},
 		{
+			name: "double slash before the value writes nothing", method: http.MethodPost, target: "/update/counter/hits//1",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "double slash before the name writes nothing", method: http.MethodPost, target: "/update/counter//hits/1",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "dot segments write nothing", method: http.MethodPost, target: "/update/counter/x/../hits/1",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "trailing slash writes nothing", method: http.MethodPost, target: "/update/counter/hits/1/",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "needlessly escaped name writes nothing", method: http.MethodPost, target: "/update/counter/%68its/1",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "escaped slash in the name writes nothing", method: http.MethodPost, target: "/update/counter/a%2Fb/1",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "standard escape is decoded", method: http.MethodPost, target: "/update/gauge/a%20b/1",
+			wantCode:  http.StatusOK,
+			wantCalls: []call{{kind: metrics.KindGauge, name: "a b", gauge: 1}},
+		},
+		{
 			name: "unknown path", method: http.MethodPost, target: "/ping",
 			wantCode: http.StatusNotFound,
 		},
@@ -96,22 +106,25 @@ func TestRouter_Update(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			spy := &spyStorage{}
+			fake := &fakeStorage{}
+			router := handler.NewRouter(fake)
+			req := httptest.NewRequest(tt.method, tt.target, nil)
 			w := httptest.NewRecorder()
 
-			handler.NewRouter(spy).ServeHTTP(w, httptest.NewRequest(tt.method, tt.target, nil))
+			router.ServeHTTP(w, req)
 
 			assert.Equal(t, tt.wantCode, w.Code)
-			assert.Equal(t, tt.wantCalls, spy.calls)
+			assert.Equal(t, tt.wantCalls, fake.calls)
 		})
 	}
 }
 
 func TestRouter_Update_AllowHeaderOnWrongMethod(t *testing.T) {
-	w := httptest.NewRecorder()
+	router := handler.NewRouter(&fakeStorage{})
 	req := httptest.NewRequest(http.MethodGet, "/update/counter/hits/1", nil)
+	w := httptest.NewRecorder()
 
-	handler.NewRouter(&spyStorage{}).ServeHTTP(w, req)
+	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 	assert.Equal(t, http.MethodPost, w.Header().Get("Allow"))
