@@ -27,28 +27,21 @@ func NewSender(endpoint string) *Sender {
 
 // Send tries every metric even after a failure, so one hiccup does not drop the batch.
 func (s *Sender) Send(snap Snapshot) error {
-	var firstErr error
-	failed := 0
-	note := func(err error) {
-		failed++
-		if firstErr == nil {
-			firstErr = err
-		}
-	}
+	var errs []error
 
 	for name, v := range snap.Gauges {
 		value := strconv.FormatFloat(float64(v), 'f', -1, 64)
 		if err := s.post(metrics.KindGauge, name, value); err != nil {
-			note(err)
+			errs = append(errs, err)
 		}
 	}
 	value := strconv.FormatInt(int64(snap.PollCount), 10)
 	if err := s.post(metrics.KindCounter, "PollCount", value); err != nil {
-		note(err)
+		errs = append(errs, err)
 	}
 
-	if failed > 0 {
-		return fmt.Errorf("%d of %d metrics failed, first: %w", failed, len(snap.Gauges)+1, firstErr)
+	if len(errs) > 0 {
+		return fmt.Errorf("%d of %d metrics failed, first: %w", len(errs), len(snap.Gauges)+1, errs[0])
 	}
 	return nil
 }

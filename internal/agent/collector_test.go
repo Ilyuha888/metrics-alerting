@@ -40,14 +40,26 @@ func TestCollector_Poll_CountsEveryTick(t *testing.T) {
 	assert.Equal(t, metrics.Counter(3), c.Snapshot().PollCount)
 }
 
-func TestCollector_Snapshot_DoesNotShareState(t *testing.T) {
+func TestCollector_Snapshot_EditingSnapshotLeavesCollector(t *testing.T) {
 	c := NewCollector()
 	c.Poll()
+	before := c.gauges["Alloc"]
 
 	snap := c.Snapshot()
 	snap.Gauges["Alloc"] = -1
 
-	assert.NotEqual(t, metrics.Gauge(-1), c.Snapshot().Gauges["Alloc"])
+	assert.Equal(t, before, c.gauges["Alloc"])
+}
+
+func TestCollector_Snapshot_LaterPollsLeaveSnapshot(t *testing.T) {
+	c := NewCollector()
+	c.Poll()
+	snap := c.Snapshot()
+	taken := snap.Gauges["Alloc"]
+
+	c.gauges["Alloc"] = -1
+
+	assert.Equal(t, taken, snap.Gauges["Alloc"])
 }
 
 func TestCollector_Reported_SubtractsDelivered(t *testing.T) {
