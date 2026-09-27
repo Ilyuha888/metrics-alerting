@@ -1,16 +1,12 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
-	"time"
+	"os"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/agent"
-)
-
-const (
-	serverEndpoint = "http://localhost:8080"
-	pollInterval   = 2 * time.Second
-	reportInterval = 10 * time.Second
 )
 
 func main() {
@@ -20,6 +16,27 @@ func main() {
 }
 
 func run() error {
+
+	f, parsErr := parseFlags(os.Args[1:])
+
+	switch {
+	case parsErr == flag.ErrHelp:
+		return nil
+	case parsErr != nil:
+		return parsErr
+	}
+
+	prot := "http"
+
+	if f.tls {
+		prot = "https"
+	}
+
+	serverEndpoint := prot + "://" + f.address.String()
+	pollInterval := f.pollInterval
+	reportInterval := f.reportInterval
+	fmt.Printf("Sending to %s\nPolling every %s\nReporting every %s\n", serverEndpoint, pollInterval, reportInterval)
+
 	c := agent.NewCollector()
 	s := agent.NewSender(serverEndpoint)
 	agent.New(c, s, pollInterval, reportInterval).Run()
