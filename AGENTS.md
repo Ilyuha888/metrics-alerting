@@ -15,6 +15,7 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
   so any code used by both lives here.
 - `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `ErrNotFound`.
   Both storage and handler import it, so neither has to import the other.
+- `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default.
 - `internal/storage/` — `MemStorage`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` interface it needs.
 - `internal/agent/` — collector, sender and the polling loop.
@@ -64,7 +65,7 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
   `main`.
 - One pull request per increment. Do not merge it; `main` receives an increment only after
   a reviewer accepts it.
-- Commit subject only, English, imperative. Add a body when the why is not visible in the
+- Commit subject only, English, imperative. Add a body when the "Why" is not visible in the
   diff.
 
 ## Conventions
@@ -88,8 +89,10 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 - `MemStorage` has no lock, so concurrent requests — two reports, or a report and a read —
   race and crash the process with a `concurrent map` fatal error. Deliberate: the mutex lands in the sprint that teaches it.
   Increment 14 runs `go test -race`, so it has to be gone by then.
-- The listen address is hardcoded. Increment 4 hands the server a random port, so it moves
-  behind a flag there.
+- The agent reports on every Nth poll, where N is `reportInterval / pollInterval` rounded
+  down, so intervals that do not divide evenly report early: `-p 3 -r 10` reports every
+  9 seconds. Exact timing needs a separate reporting timer, which waits for the sprint on
+  goroutines.
 
 ## Updating the template
 
