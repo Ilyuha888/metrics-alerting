@@ -19,7 +19,7 @@ func TestParseFlags(t *testing.T) {
 		{
 			name: "defaults",
 			args: nil,
-			want: flags{address: config.DefaultAddress},
+			want: flags{address: config.DefaultAddress()},
 		},
 		{
 			name: "number address",

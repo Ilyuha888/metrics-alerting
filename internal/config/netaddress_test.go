@@ -18,16 +18,16 @@ func TestNetAddress_Set(t *testing.T) {
 		{name: "host and port", flagValue: "example.com:60", want: config.NetAddress{Host: "example.com", Port: 60}},
 		{name: "port only", flagValue: ":65535", want: config.NetAddress{Host: "", Port: 65535}},
 		{name: "IPv6 host loses its brackets", flagValue: "[::1]:8080", want: config.NetAddress{Host: "::1", Port: 8080}},
-		{name: "empty value", flagValue: "", want: config.DefaultAddress, wantErr: "missing port in address"},
-		{name: "empty port", flagValue: "example.com:", want: config.DefaultAddress, wantErr: `port ""`},
-		{name: "port is not a number", flagValue: ":abc", want: config.DefaultAddress, wantErr: `port "abc"`},
-		{name: "port out of range 1", flagValue: ":65536", want: config.DefaultAddress, wantErr: "outside 0-65535"},
-		{name: "port out of range 2", flagValue: ":-1", want: config.DefaultAddress, wantErr: "outside 0-65535"},
-		{name: "too many colons", flagValue: "https/:xyz.com:8080", want: config.DefaultAddress, wantErr: "too many colons"},
+		{name: "empty value", flagValue: "", want: config.DefaultAddress(), wantErr: "missing port in address"},
+		{name: "empty port", flagValue: "example.com:", want: config.DefaultAddress(), wantErr: `port ""`},
+		{name: "port is not a number", flagValue: ":abc", want: config.DefaultAddress(), wantErr: `port "abc"`},
+		{name: "port out of range 1", flagValue: ":65536", want: config.DefaultAddress(), wantErr: "outside 0-65535"},
+		{name: "port out of range 2", flagValue: ":-1", want: config.DefaultAddress(), wantErr: "outside 0-65535"},
+		{name: "too many colons", flagValue: "https/:xyz.com:8080", want: config.DefaultAddress(), wantErr: "too many colons"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			adr := config.DefaultAddress
+			adr := config.DefaultAddress()
 
 			err := adr.Set(tt.flagValue)
 
@@ -55,7 +55,7 @@ func TestNetAddress_String(t *testing.T) {
 	for _, tt := range tests {
 
 		t.Run(tt.name, func(t *testing.T) {
-			adr := config.DefaultAddress
+			adr := config.DefaultAddress()
 			err := adr.Set(tt.flagValue)
 
 			require.NoError(t, err)

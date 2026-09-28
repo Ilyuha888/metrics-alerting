@@ -33,4 +33,6 @@ func (adr *NetAddress) Set(flagValue string) error {
 	return nil
 }
 
-var DefaultAddress = NetAddress{Host: "localhost", Port: 8080}
+func DefaultAddress() NetAddress {
+	return NetAddress{Host: "localhost", Port: 8080}
+}

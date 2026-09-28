@@ -17,22 +17,16 @@ func main() {
 
 func run() error {
 
-	f, parsErr := parseFlags(os.Args[1:])
+	f, err := parseFlags(os.Args[1:])
 
 	switch {
-	case parsErr == flag.ErrHelp:
+	case err == flag.ErrHelp:
 		return nil
-	case parsErr != nil:
-		return parsErr
+	case err != nil:
+		return err
 	}
 
-	prot := "http"
-
-	if f.tls {
-		prot = "https"
-	}
-
-	serverEndpoint := prot + "://" + f.address.String()
+	serverEndpoint := "http://" + f.address.String()
 	pollInterval := f.pollInterval
 	reportInterval := f.reportInterval
 	fmt.Printf("Sending to %s\nPolling every %s\nReporting every %s\n", serverEndpoint, pollInterval, reportInterval)

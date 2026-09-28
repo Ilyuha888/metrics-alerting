@@ -18,13 +18,13 @@ func main() {
 }
 
 func run() error {
-	f, parsErr := parseFlags(os.Args[1:])
+	f, err := parseFlags(os.Args[1:])
 
 	switch {
-	case parsErr == flag.ErrHelp:
+	case err == flag.ErrHelp:
 		return nil
-	case parsErr != nil:
-		return parsErr
+	case err != nil:
+		return err
 	}
 
 	fmt.Printf("Listening on %s\n", &f.address)

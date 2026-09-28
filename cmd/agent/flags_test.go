@@ -20,7 +20,7 @@ func TestParseFlags(t *testing.T) {
 		{
 			name: "defaults",
 			args: nil,
-			want: flags{address: config.DefaultAddress, reportInterval: 10 * time.Second, pollInterval: 2 * time.Second},
+			want: flags{address: config.DefaultAddress(), reportInterval: 10 * time.Second, pollInterval: 2 * time.Second},
 		},
 		{
 			name: "number address",
@@ -40,22 +40,17 @@ func TestParseFlags(t *testing.T) {
 		{
 			name: "poll interval",
 			args: []string{"-p", "5"},
-			want: flags{address: config.DefaultAddress, reportInterval: 10 * time.Second, pollInterval: 5 * time.Second},
-		},
-		{
-			name: "tls",
-			args: []string{"-tls"},
-			want: flags{address: config.DefaultAddress, tls: true, reportInterval: 10 * time.Second, pollInterval: 2 * time.Second},
+			want: flags{address: config.DefaultAddress(), reportInterval: 10 * time.Second, pollInterval: 5 * time.Second},
 		},
 		{
 			name: "every flag at once",
-			args: []string{"-a", "example.com:9000", "-r", "20", "-p", "4", "-tls"},
-			want: flags{address: config.NetAddress{Host: "example.com", Port: 9000}, tls: true, reportInterval: 20 * time.Second, pollInterval: 4 * time.Second},
+			args: []string{"-a", "example.com:9000", "-r", "20", "-p", "4"},
+			want: flags{address: config.NetAddress{Host: "example.com", Port: 9000}, reportInterval: 20 * time.Second, pollInterval: 4 * time.Second},
 		},
-		{name: "zero report interval", args: []string{"-r", "0"}, wantErr: "-r must be greater than 0"},
-		{name: "negative report interval", args: []string{"-r", "-1"}, wantErr: "-r must be greater than 0"},
-		{name: "zero poll interval", args: []string{"-p", "0"}, wantErr: "-p must be greater than 0"},
-		{name: "negative poll interval", args: []string{"-p", "-1"}, wantErr: "-p must be greater than 0"},
+		{name: "zero report interval", args: []string{"-r", "0"}, wantErr: "for flag -r: must be greater than 0"},
+		{name: "negative report interval", args: []string{"-r", "-1"}, wantErr: "for flag -r: must be greater than 0"},
+		{name: "zero poll interval", args: []string{"-p", "0"}, wantErr: "for flag -p: must be greater than 0"},
+		{name: "negative poll interval", args: []string{"-p", "-1"}, wantErr: "for flag -p: must be greater than 0"},
 		{name: "interval with a unit is not seconds", args: []string{"-r", "10s"}, wantErr: `invalid value "10s" for flag -r`},
 		{name: "address without port", args: []string{"-a", "example.com"}, wantErr: "missing port in address"},
 		{name: "unknown flag", args: []string{"-x"}, wantErr: "flag provided but not defined: -x"},
