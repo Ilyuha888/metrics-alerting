@@ -13,7 +13,12 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `cmd/agent/` — agent entry point. Directory name is fixed by CI.
 - `internal/` — everything the two binaries share. A `main` package cannot be imported,
   so any code used by both lives here.
-- `internal/models/` — domain types once there are any. No business logic.
+- `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `ErrNotFound`.
+  Both storage and handler import it, so neither has to import the other.
+- `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default.
+- `internal/storage/` — `MemStorage`.
+- `internal/handler/` — the HTTP layer on chi. It declares the `Storage` interface it needs.
+- `internal/agent/` — collector, sender and the polling loop.
 
 Do not create a directory before something goes in it. Git does not track empty
 directories, and an empty package is noise.
@@ -60,7 +65,7 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
   `main`.
 - One pull request per increment. Do not merge it; `main` receives an increment only after
   a reviewer accepts it.
-- Commit subject only, English, imperative. Add a body when the why is not visible in the
+- Commit subject only, English, imperative. Add a body when the "Why" is not visible in the
   diff.
 
 ## Conventions
@@ -69,12 +74,25 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 - Keep `main` thin: parse flags, build dependencies, call `run() error`. `os.Exit` skips
   deferred calls, so it belongs in `main` and nowhere deeper.
 - Errors are returned, not panicked, and wrapped with `fmt.Errorf("...: %w", err)`.
-- Every exported identifier has a doc comment. Comments explain why, not what.
-- Table-driven tests next to the code as `*_test.go`, named
-  `Test<Function>_<Scenario>_<Expected>`.
+- Comments carry a load-bearing why — an ordering that looks wrong but isn't, a decision
+  a reader would otherwise reverse. A comment that restates the code gets deleted. Every
+  package keeps its one-line package comment.
+- Table-driven tests next to the code as `*_test.go`. The function is named
+  `Test<Type>_<Method>_<Expected>`; each case states its own scenario in the subtest name.
+  A test file uses the external `<pkg>_test` package unless it needs unexported state.
 - Package name equals directory name.
 - Handle every edge and negative case the increment describes; the autotests tighten each
   sprint.
+
+## Known debt
+
+- `MemStorage` has no lock, so concurrent requests — two reports, or a report and a read —
+  race and crash the process with a `concurrent map` fatal error. Deliberate: the mutex lands in the sprint that teaches it.
+  Increment 14 runs `go test -race`, so it has to be gone by then.
+- The agent reports on every Nth poll, where N is `reportInterval / pollInterval` rounded
+  down, so intervals that do not divide evenly report early: `-p 3 -r 10` reports every
+  9 seconds. Exact timing needs a separate reporting timer, which waits for the sprint on
+  goroutines.
 
 ## Updating the template
 
