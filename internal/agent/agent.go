@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -14,16 +14,17 @@ type Agent struct {
 	reporter     reporter
 	pollInterval time.Duration
 	everyN       int
+	log          *slog.Logger
 }
 
 // New reports once every everyN polls; a reportInterval that is not a multiple of
 // pollInterval rounds down.
-func New(c *Collector, r reporter, pollInterval, reportInterval time.Duration) *Agent {
+func New(c *Collector, r reporter, pollInterval, reportInterval time.Duration, lg *slog.Logger) *Agent {
 	everyN := int(reportInterval / pollInterval)
 	if everyN < 1 {
 		everyN = 1
 	}
-	return &Agent{collector: c, reporter: r, pollInterval: pollInterval, everyN: everyN}
+	return &Agent{collector: c, reporter: r, pollInterval: pollInterval, everyN: everyN, log: lg}
 }
 
 // Run never returns. One goroutine does both jobs, which is why the collector needs no
@@ -44,7 +45,7 @@ func (a *Agent) step(i int) {
 	snap := a.collector.Snapshot()
 	if err := a.reporter.Send(snap); err != nil {
 		// The server may not be up yet; keep the polls for the next report.
-		log.Println(err)
+		a.log.Error("send metrics", "err", err)
 		return
 	}
 	a.collector.Reported(snap)

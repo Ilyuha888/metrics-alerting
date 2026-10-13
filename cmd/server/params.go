@@ -3,13 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/config"
 	"github.com/caarlos0/env/v11"
 )
 
 type params struct {
-	address config.NetAddress
+	address  config.NetAddress
+	logLevel slog.Level
 }
 
 // Strings, so an env value goes through the same Set as the flag.
@@ -24,6 +26,7 @@ func parseParams(args []string) (params, error) {
 
 	p.address = config.DefaultAddress()
 	fs.Var(&p.address, "a", "Net address host:port")
+	fs.TextVar(&p.logLevel, "l", slog.LevelInfo, "log level")
 	if err := fs.Parse(args); err != nil {
 		return p, err
 	}

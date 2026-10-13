@@ -16,6 +16,7 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `ErrNotFound`.
   Both storage and handler import it, so neither has to import the other.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default.
+- `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-l` flag.
 - `internal/storage/` — `MemStorage`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` interface it needs.
 - `internal/agent/` — collector, sender and the polling loop.

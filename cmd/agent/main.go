@@ -2,11 +2,11 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"os"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/agent"
+	"github.com/Ilyuha888/metrics-alerting/internal/logger"
 )
 
 func main() {
@@ -29,10 +29,11 @@ func run() error {
 	serverEndpoint := "http://" + p.address.String()
 	pollInterval := p.pollInterval
 	reportInterval := p.reportInterval
-	fmt.Printf("Sending to %s\nPolling every %s\nReporting every %s\n", serverEndpoint, pollInterval, reportInterval)
+	lg := logger.New(p.logLevel)
+	lg.Info("agent started", "server", serverEndpoint, "poll", pollInterval, "report", reportInterval)
 
 	c := agent.NewCollector()
 	s := agent.NewSender(serverEndpoint)
-	agent.New(c, s, pollInterval, reportInterval).Run()
+	agent.New(c, s, pollInterval, reportInterval, lg).Run()
 	return nil
 }
