@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -35,6 +36,7 @@ type params struct {
 	address        config.NetAddress
 	reportInterval time.Duration
 	pollInterval   time.Duration
+	logLevel       slog.Level
 }
 
 // Env intervals are bare seconds ("5"), and env sees only the declared field type, so a
@@ -58,6 +60,7 @@ func parseParams(args []string) (params, error) {
 	fs.Var(&p.address, "a", "Net address host:port")
 	fs.Var((*seconds)(&p.reportInterval), "r", "Reporting interval in seconds")
 	fs.Var((*seconds)(&p.pollInterval), "p", "Polling interval in seconds")
+	fs.TextVar(&p.logLevel, "l", slog.LevelInfo, "log level")
 
 	if err := fs.Parse(args); err != nil {
 		return p, err

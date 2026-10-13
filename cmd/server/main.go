@@ -2,12 +2,12 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/handler"
+	"github.com/Ilyuha888/metrics-alerting/internal/logger"
 	"github.com/Ilyuha888/metrics-alerting/internal/storage"
 )
 
@@ -27,9 +27,10 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("Listening on %s\n", &p.address)
+	lg := logger.New(p.logLevel)
 	serverEndpoint := p.address.String()
+	lg.Info("listening", "address", serverEndpoint)
 	st := storage.NewMemStorage()
-	h := handler.NewRouter(st)
+	h := handler.WithLogging(lg, handler.NewRouter(st))
 	return http.ListenAndServe(serverEndpoint, h)
 }

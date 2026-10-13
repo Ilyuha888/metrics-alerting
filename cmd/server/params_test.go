@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"log/slog"
 	"os"
 	"testing"
 
@@ -22,8 +23,14 @@ func TestParseParams(t *testing.T) {
 		{
 			name: "defaults",
 			args: nil,
-			want: params{address: config.DefaultAddress()},
+			want: params{address: config.DefaultAddress(), logLevel: slog.LevelInfo},
 		},
+		{
+			name: "debug log level",
+			args: []string{"-l", "debug"},
+			want: params{address: config.DefaultAddress(), logLevel: slog.LevelDebug},
+		},
+		{name: "unknown log level", args: []string{"-l", "loud"}, wantErr: `invalid value "loud" for flag -l`},
 		{
 			name: "number address",
 			args: []string{"-a", "127.0.0.1:1234"},
