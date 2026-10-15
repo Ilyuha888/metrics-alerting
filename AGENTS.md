@@ -15,6 +15,7 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
   so any code used by both lives here.
 - `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `ErrNotFound`.
   Both storage and handler import it, so neither has to import the other.
+- `internal/models/` — `Metrics`, the JSON wire format the agent sends and the server reads and answers.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default.
 - `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-l` flag.
 - `internal/storage/` — `MemStorage`.

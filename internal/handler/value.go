@@ -6,37 +6,22 @@ import (
 	"strconv"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
+	"github.com/Ilyuha888/metrics-alerting/internal/models"
 )
 
 func (h *handlers) value(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-
-	switch metrics.Kind(r.PathValue("kind")) {
-	case metrics.KindGauge:
-		v, err := h.storage.Gauge(name)
-		if err != nil {
-			writeReadError(w, err)
-			return
-		}
-		writeText(w, formatGauge(v))
-	case metrics.KindCounter:
-		v, err := h.storage.Counter(name)
-		if err != nil {
-			writeReadError(w, err)
-			return
-		}
-		writeText(w, formatCounter(v))
-	default:
-		http.Error(w, "unknown metric type", http.StatusBadRequest)
-	}
-}
-
-func writeReadError(w http.ResponseWriter, err error) {
-	if err == metrics.ErrNotFound {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	m, err := h.load(models.Metrics{ID: r.PathValue("name"), MType: metrics.Kind(r.PathValue("kind"))})
+	if err != nil {
+		writeError(w, err)
 		return
 	}
-	http.Error(w, "storage read failed", http.StatusInternalServerError)
+
+	switch m.MType {
+	case metrics.KindGauge:
+		writeText(w, formatGauge(metrics.Gauge(*m.Value)))
+	case metrics.KindCounter:
+		writeText(w, formatCounter(metrics.Counter(*m.Delta)))
+	}
 }
 
 func writeText(w http.ResponseWriter, s string) {
