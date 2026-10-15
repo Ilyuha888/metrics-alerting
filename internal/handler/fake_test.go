@@ -10,7 +10,8 @@ type call struct {
 	count metrics.Counter
 }
 
-// fakeStorage records writes and serves reads from preset maps; readErr fails every read.
+// fakeStorage records writes and applies them to the maps, since POST /update answers with
+// a read after the write; readErr fails every read.
 type fakeStorage struct {
 	calls    []call
 	gauges   map[string]metrics.Gauge
@@ -20,10 +21,18 @@ type fakeStorage struct {
 
 func (f *fakeStorage) SetGauge(name string, v metrics.Gauge) {
 	f.calls = append(f.calls, call{kind: metrics.KindGauge, name: name, gauge: v})
+	if f.gauges == nil {
+		f.gauges = make(map[string]metrics.Gauge)
+	}
+	f.gauges[name] = v
 }
 
 func (f *fakeStorage) AddCounter(name string, v metrics.Counter) {
 	f.calls = append(f.calls, call{kind: metrics.KindCounter, name: name, count: v})
+	if f.counters == nil {
+		f.counters = make(map[string]metrics.Counter)
+	}
+	f.counters[name] += v
 }
 
 func (f *fakeStorage) Gauge(name string) (metrics.Gauge, error) {

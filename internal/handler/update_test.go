@@ -67,6 +67,14 @@ func TestRouter_Update(t *testing.T) {
 			wantCode: http.StatusNotFound,
 		},
 		{
+			name: "trailing slash after a gauge value writes nothing", method: http.MethodPost, target: "/update/gauge/x/1/",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "root double slash", method: http.MethodGet, target: "//",
+			wantCode: http.StatusNotFound,
+		},
+		{
 			name: "needlessly escaped name writes nothing", method: http.MethodPost, target: "/update/counter/%68its/1",
 			wantCode: http.StatusNotFound,
 		},
