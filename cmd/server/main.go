@@ -18,7 +18,7 @@ func main() {
 }
 
 func run() error {
-	f, err := parseFlags(os.Args[1:])
+	p, err := parseParams(os.Args[1:])
 
 	switch {
 	case err == flag.ErrHelp:
@@ -27,8 +27,8 @@ func run() error {
 		return err
 	}
 
-	fmt.Printf("Listening on %s\n", &f.address)
-	serverEndpoint := f.address.String()
+	fmt.Printf("Listening on %s\n", &p.address)
+	serverEndpoint := p.address.String()
 	st := storage.NewMemStorage()
 	h := handler.NewRouter(st)
 	return http.ListenAndServe(serverEndpoint, h)

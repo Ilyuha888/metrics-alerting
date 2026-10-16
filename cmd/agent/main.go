@@ -17,7 +17,7 @@ func main() {
 
 func run() error {
 
-	f, err := parseFlags(os.Args[1:])
+	p, err := parseParams(os.Args[1:])
 
 	switch {
 	case err == flag.ErrHelp:
@@ -26,9 +26,9 @@ func run() error {
 		return err
 	}
 
-	serverEndpoint := "http://" + f.address.String()
-	pollInterval := f.pollInterval
-	reportInterval := f.reportInterval
+	serverEndpoint := "http://" + p.address.String()
+	pollInterval := p.pollInterval
+	reportInterval := p.reportInterval
 	fmt.Printf("Sending to %s\nPolling every %s\nReporting every %s\n", serverEndpoint, pollInterval, reportInterval)
 
 	c := agent.NewCollector()
