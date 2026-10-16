@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/handler"
@@ -84,7 +85,7 @@ func TestWithLogging_ServeHTTP_LogsOneRecordPerRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			lg := slog.New(slog.NewJSONHandler(&buf, nil))
-			h := handler.WithLogging(lg, tt.inner)
+			h := handler.WithLogging(lg)(tt.inner)
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			rec := httptest.NewRecorder()
 
@@ -102,6 +103,69 @@ func TestWithLogging_ServeHTTP_LogsOneRecordPerRequest(t *testing.T) {
 			assert.EqualValues(t, tt.wantStatus, entry["status"])
 			assert.EqualValues(t, tt.wantSize, entry["size"])
 			assert.Contains(t, entry, "duration")
+		})
+	}
+}
+
+func TestRouter_Logging_LogsEveryRejectionWithItsStatus(t *testing.T) {
+	tests := []struct {
+		name            string
+		method          string
+		target          string
+		contentEncoding string
+		wantStatus      int
+	}{
+		{
+			name:       "unclean path is 404",
+			method:     http.MethodPost,
+			target:     "/update/counter//hits/1",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "unknown route is 404",
+			method:     http.MethodGet,
+			target:     "/nope",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "wrong method is 405",
+			method:     http.MethodDelete,
+			target:     "/value/gauge/temp",
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:            "unclean path with br is 404, not 415",
+			method:          http.MethodPost,
+			target:          "//update",
+			contentEncoding: "br",
+			wantStatus:      http.StatusNotFound,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			lg := slog.New(slog.NewJSONHandler(&buf, nil))
+			fake := &fakeStorage{}
+			router := handler.NewRouter(fake, lg)
+			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader("payload"))
+			if tt.contentEncoding != "" {
+				req.Header.Set("Content-Encoding", tt.contentEncoding)
+			}
+			rec := httptest.NewRecorder()
+
+			router.ServeHTTP(rec, req)
+
+			res := rec.Result()
+			defer res.Body.Close()
+			require.Equal(t, tt.wantStatus, res.StatusCode)
+			assert.Empty(t, fake.calls)
+			lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+			require.Len(t, lines, 1)
+			var entry map[string]any
+			require.NoError(t, json.Unmarshal(lines[0], &entry))
+			assert.Equal(t, tt.target, entry["uri"])
+			assert.Equal(t, tt.method, entry["method"])
+			assert.EqualValues(t, tt.wantStatus, entry["status"])
 		})
 	}
 }

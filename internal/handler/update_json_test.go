@@ -12,7 +12,7 @@ import (
 )
 
 func postJSON(s *fakeStorage, target, contentType, body string) *httptest.ResponseRecorder {
-	router := handler.NewRouter(s)
+	router := handler.NewRouter(s, discardLogger)
 	req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)

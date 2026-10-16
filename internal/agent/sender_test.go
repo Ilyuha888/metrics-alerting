@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,10 +15,11 @@ import (
 )
 
 type recorded struct {
-	method      string
-	path        string
-	contentType string
-	body        []byte
+	method          string
+	path            string
+	contentType     string
+	contentEncoding string
+	body            []byte
 }
 
 // recorder answers every request with status and records what arrived. The slice needs
@@ -28,8 +30,14 @@ type recorder struct {
 }
 
 func (rec *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	rec.got = append(rec.got, recorded{r.Method, r.URL.Path, r.Header.Get("Content-Type"), body})
+	// A body that is not gzip stays empty, so decodeBody fails the test that reads it.
+	var body []byte
+	if zr, err := gzip.NewReader(r.Body); err == nil {
+		body, _ = io.ReadAll(zr)
+	}
+	rec.got = append(rec.got, recorded{
+		r.Method, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Content-Encoding"), body,
+	})
 	w.WriteHeader(rec.status)
 }
 
@@ -79,6 +87,7 @@ func TestSender_Send_BuildsTheRequestTheSpecDescribes(t *testing.T) {
 			assert.Equal(t, "/update", got[0].path)
 			assert.Equal(t, http.MethodPost, got[0].method)
 			assert.Equal(t, "application/json", got[0].contentType)
+			assert.Equal(t, "gzip", got[0].contentEncoding)
 			assert.Equal(t, tt.want, decodeBody(t, got[0].body))
 		})
 	}

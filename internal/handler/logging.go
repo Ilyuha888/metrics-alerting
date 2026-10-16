@@ -29,20 +29,22 @@ func (lw *loggingResponseWriter) WriteHeader(code int) {
 	lw.w.WriteHeader(code)
 }
 
-func WithLogging(lg *slog.Logger, h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		// A handler that never calls WriteHeader gets 200 from the original writer, so this one never hears it.
-		lw := &loggingResponseWriter{w: w, status: http.StatusOK}
+func WithLogging(lg *slog.Logger) func(http.Handler) http.Handler {
+	return func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			// A handler that never calls WriteHeader gets 200 from the original writer, so this one never hears it.
+			lw := &loggingResponseWriter{w: w, status: http.StatusOK}
 
-		h.ServeHTTP(lw, r)
+			h.ServeHTTP(lw, r)
 
-		lg.Info("request",
-			"uri", r.RequestURI,
-			"method", r.Method,
-			"duration", time.Since(start),
-			"status", lw.status,
-			"size", lw.size,
-		)
-	})
+			lg.Info("request",
+				"uri", r.RequestURI,
+				"method", r.Method,
+				"duration", time.Since(start),
+				"status", lw.status,
+				"size", lw.size,
+			)
+		})
+	}
 }

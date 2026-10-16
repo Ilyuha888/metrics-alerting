@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,17 +50,18 @@ func (s *Sender) Send(snap Snapshot) error {
 }
 
 func (s *Sender) post(m models.Metrics) error {
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(m); err != nil {
-		return fmt.Errorf("encode %s: %w", m.ID, err)
+	buf, err := gzipJSON(m)
+	if err != nil {
+		return err
 	}
 
 	url := fmt.Sprintf("%s/update", s.endpoint)
-	req, err := http.NewRequest(http.MethodPost, url, &buf)
+	req, err := http.NewRequest(http.MethodPost, url, buf)
 	if err != nil {
 		return fmt.Errorf("build request %s: %w", url, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
 
 	// The client's error already names the method and the URL.
 	resp, err := s.client.Do(req)
@@ -76,4 +78,17 @@ func (s *Sender) post(m models.Metrics) error {
 		return fmt.Errorf("post %s for %s: status %d", url, m.ID, resp.StatusCode)
 	}
 	return nil
+}
+
+func gzipJSON(m models.Metrics) (*bytes.Buffer, error) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if err := json.NewEncoder(zw).Encode(m); err != nil {
+		return nil, fmt.Errorf("encode %s: %w", m.ID, err)
+	}
+	// Close writes the gzip footer; without it the server reads a truncated stream.
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("compress %s: %w", m.ID, err)
+	}
+	return &buf, nil
 }
