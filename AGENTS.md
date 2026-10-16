@@ -65,6 +65,10 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
   `main`.
 - One pull request per increment. Do not merge it; `main` receives an increment only after
   a reviewer accepts it.
+- Each `iterN` PR targets `iter(N-1)`; before a sprint's review, retarget its last PR to
+  `main`.
+- The repo owner merges, with a merge commit, never squash; fix a pushed lower branch with new
+  commits only.
 - Commit subject only, English, imperative. Add a body when the "Why" is not visible in the
   diff.
 
