@@ -31,6 +31,6 @@ func run() error {
 	serverEndpoint := p.address.String()
 	lg.Info("listening", "address", serverEndpoint)
 	st := storage.NewMemStorage()
-	h := handler.WithLogging(lg, handler.NewRouter(st))
+	h := handler.NewRouter(st, lg)
 	return http.ListenAndServe(serverEndpoint, h)
 }

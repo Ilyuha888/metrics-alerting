@@ -1,7 +1,13 @@
 // External test package: everything goes through NewRouter, as for a real caller.
 package handler_test
 
-import "github.com/Ilyuha888/metrics-alerting/internal/metrics"
+import (
+	"log/slog"
+
+	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
+)
+
+var discardLogger = slog.New(slog.DiscardHandler)
 
 type call struct {
 	kind  metrics.Kind

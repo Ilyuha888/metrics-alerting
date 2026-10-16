@@ -44,7 +44,7 @@ func TestRouter_Value(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := handler.NewRouter(tt.storage)
+			router := handler.NewRouter(tt.storage, discardLogger)
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			w := httptest.NewRecorder()
 

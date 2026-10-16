@@ -115,7 +115,7 @@ func TestRouter_Update(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeStorage{}
-			router := handler.NewRouter(fake)
+			router := handler.NewRouter(fake, discardLogger)
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			w := httptest.NewRecorder()
 
@@ -128,7 +128,7 @@ func TestRouter_Update(t *testing.T) {
 }
 
 func TestRouter_Update_AllowHeaderOnWrongMethod(t *testing.T) {
-	router := handler.NewRouter(&fakeStorage{})
+	router := handler.NewRouter(&fakeStorage{}, discardLogger)
 	req := httptest.NewRequest(http.MethodGet, "/update/counter/hits/1", nil)
 	w := httptest.NewRecorder()
 

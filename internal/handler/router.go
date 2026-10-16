@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -24,11 +25,12 @@ type handlers struct {
 }
 
 // NewRouter returns the routes; patterns alone answer 404 for a missing name, 405 for a wrong method.
-func NewRouter(s Storage) http.Handler {
+func NewRouter(s Storage, lg *slog.Logger) http.Handler {
 	h := &handlers{storage: s}
 
 	r := chi.NewRouter()
-	r.Use(rejectUncleanPath)
+	// Logging goes first, so it also records the 404s, 405s and gzip rejections the rest answer.
+	r.Use(WithLogging(lg), rejectUncleanPath, WithGzip)
 
 	r.Post("/update", h.updateJSON)
 	r.Post("/update/", h.updateJSON)
