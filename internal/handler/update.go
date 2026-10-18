@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"math"
 	"net/http"
 	"strconv"
 
@@ -18,6 +19,11 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 		v, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
 			http.Error(w, "gauge value must be a float64", http.StatusBadRequest)
+			return
+		}
+		// ParseFloat accepts "NaN" and "Inf". JSON cannot encode them, so one stored value would fail every later file save.
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			http.Error(w, "gauge value must be a finite float64", http.StatusBadRequest)
 			return
 		}
 		m.Value = &v

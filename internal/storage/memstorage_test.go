@@ -2,6 +2,7 @@
 package storage
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
@@ -167,4 +168,28 @@ func TestMemStorage_Snapshot_LaterWritesLeaveSnapshot(t *testing.T) {
 		Gauges:   map[string]metrics.Gauge{"temp": 36.6},
 		Counters: map[string]metrics.Counter{"hits": 527},
 	}, snap)
+}
+
+// Writers and a reader run at once; under -race an unguarded map fails this test.
+func TestMemStorage_Snapshot_ConcurrentWithWritesIsSafe(t *testing.T) {
+	const writers, reports = 8, 100
+	s := NewMemStorage()
+
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Go(func() {
+			for i := range reports {
+				s.SetGauge("temp", metrics.Gauge(i))
+				s.AddCounter("hits", 1)
+			}
+		})
+	}
+	wg.Go(func() {
+		for range reports {
+			s.Snapshot()
+		}
+	})
+	wg.Wait()
+
+	assert.Equal(t, metrics.Counter(writers*reports), s.counters["hits"])
 }

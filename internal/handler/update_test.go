@@ -111,6 +111,18 @@ func TestRouter_Update(t *testing.T) {
 			name: "gauge value overflows float64", method: http.MethodPost, target: "/update/gauge/temp/1e999",
 			wantCode: http.StatusBadRequest,
 		},
+		{
+			name: "gauge value NaN is rejected", method: http.MethodPost, target: "/update/gauge/temp/NaN",
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name: "gauge value Inf is rejected", method: http.MethodPost, target: "/update/gauge/temp/Inf",
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name: "gauge value -Inf is rejected", method: http.MethodPost, target: "/update/gauge/temp/-Inf",
+			wantCode: http.StatusBadRequest,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

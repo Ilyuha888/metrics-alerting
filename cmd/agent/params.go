@@ -1,36 +1,14 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/config"
 	"github.com/caarlos0/env/v11"
 )
-
-type seconds time.Duration
-
-func (s *seconds) String() string {
-	sec := strconv.Itoa(int(time.Duration(*s) / time.Second))
-	return sec
-}
-
-func (s *seconds) Set(s2 string) error {
-	sec, err := strconv.Atoi(s2)
-	if err != nil {
-		return err
-	}
-	if sec <= 0 {
-		return errors.New("must be greater than 0")
-	}
-
-	*s = seconds(time.Duration(sec) * time.Second)
-	return nil
-}
 
 type params struct {
 	address        config.NetAddress
@@ -58,8 +36,8 @@ func parseParams(args []string) (params, error) {
 	p.reportInterval = 10 * time.Second
 
 	fs.Var(&p.address, "a", "Net address host:port")
-	fs.Var((*seconds)(&p.reportInterval), "r", "Reporting interval in seconds")
-	fs.Var((*seconds)(&p.pollInterval), "p", "Polling interval in seconds")
+	fs.Var((*config.Seconds)(&p.reportInterval), "r", "Reporting interval in seconds")
+	fs.Var((*config.Seconds)(&p.pollInterval), "p", "Polling interval in seconds")
 	fs.TextVar(&p.logLevel, "l", slog.LevelInfo, "log level")
 
 	if err := fs.Parse(args); err != nil {
@@ -76,15 +54,34 @@ func parseParams(args []string) (params, error) {
 		}
 	}
 	if e.ReportInterval != "" {
-		if err := (*seconds)(&p.reportInterval).Set(e.ReportInterval); err != nil {
+		if err := (*config.Seconds)(&p.reportInterval).Set(e.ReportInterval); err != nil {
 			return p, fmt.Errorf("REPORT_INTERVAL: %w", err)
 		}
 	}
 	if e.PollInterval != "" {
-		if err := (*seconds)(&p.pollInterval).Set(e.PollInterval); err != nil {
+		if err := (*config.Seconds)(&p.pollInterval).Set(e.PollInterval); err != nil {
 			return p, fmt.Errorf("POLL_INTERVAL: %w", err)
 		}
 	}
 
+	if err := checkPositive(p.reportInterval, "r", "REPORT_INTERVAL", e.ReportInterval); err != nil {
+		return p, err
+	}
+	if err := checkPositive(p.pollInterval, "p", "POLL_INTERVAL", e.PollInterval); err != nil {
+		return p, err
+	}
+
 	return p, nil
+}
+
+// checkPositive keeps the error text the agent gave when its own seconds type rejected 0,
+// naming the env variable when it set the value and the flag otherwise.
+func checkPositive(d time.Duration, flagName, envName, envValue string) error {
+	if d > 0 {
+		return nil
+	}
+	if envValue != "" {
+		return fmt.Errorf("%s: must be greater than 0", envName)
+	}
+	return fmt.Errorf("invalid value %q for flag -%s: must be greater than 0", (*config.Seconds)(&d).String(), flagName)
 }
