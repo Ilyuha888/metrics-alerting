@@ -85,6 +85,8 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 - Table-driven tests next to the code as `*_test.go`. The function is named
   `Test<Type>_<Method>_<Expected>`; each case states its own scenario in the subtest name.
   A test file uses the external `<pkg>_test` package unless it needs unexported state.
+- statictest's bodyclose check covers tests: close a `rec.Result()` body with
+  `defer res.Body.Close()` at the call site; closing it in a helper via `t.Cleanup` fails.
 - Package name equals directory name.
 - Handle every edge and negative case the increment describes; the autotests tighten each
   sprint.
