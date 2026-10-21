@@ -1,0 +1,11 @@
+// Package logger builds the slog logger both binaries share.
+package logger
+
+import (
+	"log/slog"
+	"os"
+)
+
+func New(level slog.Level) *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+}

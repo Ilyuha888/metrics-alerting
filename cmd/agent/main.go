@@ -1,12 +1,13 @@
 package main
 
 import (
+	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/agent"
+	"github.com/Ilyuha888/metrics-alerting/internal/logger"
 )
 
 func main() {
@@ -17,22 +18,23 @@ func main() {
 
 func run() error {
 
-	f, err := parseFlags(os.Args[1:])
+	p, err := parseParams(os.Args[1:])
 
 	switch {
-	case err == flag.ErrHelp:
+	case errors.Is(err, flag.ErrHelp):
 		return nil
 	case err != nil:
 		return err
 	}
 
-	serverEndpoint := "http://" + f.address.String()
-	pollInterval := f.pollInterval
-	reportInterval := f.reportInterval
-	fmt.Printf("Sending to %s\nPolling every %s\nReporting every %s\n", serverEndpoint, pollInterval, reportInterval)
+	serverEndpoint := "http://" + p.address.String()
+	pollInterval := p.pollInterval
+	reportInterval := p.reportInterval
+	lg := logger.New(p.logLevel)
+	lg.Info("agent started", "server", serverEndpoint, "poll", pollInterval, "report", reportInterval)
 
 	c := agent.NewCollector()
 	s := agent.NewSender(serverEndpoint)
-	agent.New(c, s, pollInterval, reportInterval).Run()
+	agent.New(c, s, pollInterval, reportInterval, lg).Run()
 	return nil
 }

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -18,6 +20,8 @@ func (s *stubReporter) Send(snap Snapshot) error {
 	s.sent = append(s.sent, snap)
 	return s.err
 }
+
+var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // step is driven directly instead of Run, which sleeps and never returns.
 func TestAgent_step_ReportsEveryNthPoll(t *testing.T) {
@@ -37,7 +41,7 @@ func TestAgent_step_ReportsEveryNthPoll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rep := &stubReporter{}
-			a := New(NewCollector(), rep, tt.poll, tt.report)
+			a := New(NewCollector(), rep, tt.poll, tt.report, discard)
 
 			for i := 1; i <= tt.ticks; i++ {
 				a.step(i)
@@ -53,7 +57,7 @@ func TestAgent_step_ReportsEveryNthPoll(t *testing.T) {
 
 func TestAgent_step_FailedReportKeepsThePolls(t *testing.T) {
 	rep := &stubReporter{err: errors.New("server is down")}
-	a := New(NewCollector(), rep, 2*time.Second, 10*time.Second)
+	a := New(NewCollector(), rep, 2*time.Second, 10*time.Second, discard)
 
 	for i := 1; i <= 10; i++ {
 		a.step(i)
@@ -66,7 +70,7 @@ func TestAgent_step_FailedReportKeepsThePolls(t *testing.T) {
 
 func TestAgent_step_RecoversAfterAFailedReport(t *testing.T) {
 	rep := &stubReporter{err: errors.New("server is down")}
-	a := New(NewCollector(), rep, 2*time.Second, 10*time.Second)
+	a := New(NewCollector(), rep, 2*time.Second, 10*time.Second, discard)
 
 	for i := 1; i <= 5; i++ {
 		a.step(i)

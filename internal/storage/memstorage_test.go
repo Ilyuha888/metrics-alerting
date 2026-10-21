@@ -2,6 +2,7 @@
 package storage
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
@@ -82,7 +83,7 @@ func TestMemStorage_Gauge(t *testing.T) {
 
 			got, err := s.Gauge(tt.lookup)
 
-			assert.Equal(t, tt.wantErr, err)
+			assert.ErrorIs(t, err, tt.wantErr)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -109,7 +110,7 @@ func TestMemStorage_Counter(t *testing.T) {
 
 			got, err := s.Counter(tt.lookup)
 
-			assert.Equal(t, tt.wantErr, err)
+			assert.ErrorIs(t, err, tt.wantErr)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -121,7 +122,7 @@ func TestMemStorage_Counter_DoesNotSeeGauges(t *testing.T) {
 
 	_, err := s.Counter("only_gauge")
 
-	assert.Equal(t, metrics.ErrNotFound, err)
+	assert.ErrorIs(t, err, metrics.ErrNotFound)
 }
 
 func TestMemStorage_Snapshot_HoldsBothKinds(t *testing.T) {
@@ -167,4 +168,28 @@ func TestMemStorage_Snapshot_LaterWritesLeaveSnapshot(t *testing.T) {
 		Gauges:   map[string]metrics.Gauge{"temp": 36.6},
 		Counters: map[string]metrics.Counter{"hits": 527},
 	}, snap)
+}
+
+// Writers and a reader run at once; under -race an unguarded map fails this test.
+func TestMemStorage_Snapshot_ConcurrentWithWritesIsSafe(t *testing.T) {
+	const writers, reports = 8, 100
+	s := NewMemStorage()
+
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Go(func() {
+			for i := range reports {
+				s.SetGauge("temp", metrics.Gauge(i))
+				s.AddCounter("hits", 1)
+			}
+		})
+	}
+	wg.Go(func() {
+		for range reports {
+			s.Snapshot()
+		}
+	})
+	wg.Wait()
+
+	assert.Equal(t, metrics.Counter(writers*reports), s.counters["hits"])
 }

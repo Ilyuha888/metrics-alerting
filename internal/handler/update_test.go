@@ -1,8 +1,13 @@
 package handler_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/handler"
@@ -67,6 +72,14 @@ func TestRouter_Update(t *testing.T) {
 			wantCode: http.StatusNotFound,
 		},
 		{
+			name: "trailing slash after a gauge value writes nothing", method: http.MethodPost, target: "/update/gauge/x/1/",
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name: "root double slash", method: http.MethodGet, target: "//",
+			wantCode: http.StatusNotFound,
+		},
+		{
 			name: "needlessly escaped name writes nothing", method: http.MethodPost, target: "/update/counter/%68its/1",
 			wantCode: http.StatusNotFound,
 		},
@@ -103,11 +116,23 @@ func TestRouter_Update(t *testing.T) {
 			name: "gauge value overflows float64", method: http.MethodPost, target: "/update/gauge/temp/1e999",
 			wantCode: http.StatusBadRequest,
 		},
+		{
+			name: "gauge value NaN is rejected", method: http.MethodPost, target: "/update/gauge/temp/NaN",
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name: "gauge value Inf is rejected", method: http.MethodPost, target: "/update/gauge/temp/Inf",
+			wantCode: http.StatusBadRequest,
+		},
+		{
+			name: "gauge value -Inf is rejected", method: http.MethodPost, target: "/update/gauge/temp/-Inf",
+			wantCode: http.StatusBadRequest,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeStorage{}
-			router := handler.NewRouter(fake)
+			router := handler.NewRouter(fake, discardLogger)
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			w := httptest.NewRecorder()
 
@@ -120,7 +145,7 @@ func TestRouter_Update(t *testing.T) {
 }
 
 func TestRouter_Update_AllowHeaderOnWrongMethod(t *testing.T) {
-	router := handler.NewRouter(&fakeStorage{})
+	router := handler.NewRouter(&fakeStorage{}, discardLogger)
 	req := httptest.NewRequest(http.MethodGet, "/update/counter/hits/1", nil)
 	w := httptest.NewRecorder()
 
@@ -128,4 +153,47 @@ func TestRouter_Update_AllowHeaderOnWrongMethod(t *testing.T) {
 
 	require.Equal(t, http.StatusMethodNotAllowed, w.Code)
 	assert.Equal(t, http.MethodPost, w.Header().Get("Allow"))
+}
+
+func TestRouter_Update_FailedWriteAnswers500AndLogsTheCause(t *testing.T) {
+	tests := []struct {
+		name        string
+		target      string
+		contentType string
+		body        string
+	}{
+		{name: "gauge by URL", target: "/update/gauge/temp/36.6"},
+		{name: "counter by URL", target: "/update/counter/hits/5"},
+		{name: "gauge by JSON", target: "/update", contentType: "application/json", body: `{"id":"temp","type":"gauge","value":36.6}`},
+		{name: "counter by JSON", target: "/update", contentType: "application/json", body: `{"id":"hits","type":"counter","delta":5}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			lg := slog.New(slog.NewJSONHandler(&buf, nil))
+			fake := &fakeStorage{writeErr: errors.New("disk full")}
+			router := handler.NewRouter(fake, lg)
+			req := httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(tt.body))
+			if tt.contentType != "" {
+				req.Header.Set("Content-Type", tt.contentType)
+			}
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusInternalServerError, w.Code)
+			assert.Equal(t, "storage failed\n", w.Body.String())
+			var errorEntries []map[string]any
+			for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+				var entry map[string]any
+				require.NoError(t, json.Unmarshal(line, &entry))
+				if entry["level"] == "ERROR" {
+					errorEntries = append(errorEntries, entry)
+				}
+			}
+			require.Len(t, errorEntries, 1)
+			assert.Equal(t, "storage failed", errorEntries[0]["msg"])
+			assert.Equal(t, "disk full", errorEntries[0]["err"])
+		})
+	}
 }
