@@ -20,12 +20,19 @@ var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func newStorage(t *testing.T, path string, interval time.Duration) *filestore.Storage {
 	t.Helper()
-	st, err := filestore.New(storage.NewMemStorage(), path, interval, discard)
+	st, err := filestore.New(storage.NewMemStorage(), path, interval, false, discard)
 	require.NoError(t, err)
 	return st
 }
 
-func TestStorage_Load_RestoresSavedValues(t *testing.T) {
+func restoreStorage(t *testing.T, path string, interval time.Duration) *filestore.Storage {
+	t.Helper()
+	st, err := filestore.New(storage.NewMemStorage(), path, interval, true, discard)
+	require.NoError(t, err)
+	return st
+}
+
+func TestNew_RestoresSavedValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.json")
 	saved := newStorage(t, path, time.Hour)
 	saved.SetGauge("temp", 36.6)
@@ -33,21 +40,27 @@ func TestStorage_Load_RestoresSavedValues(t *testing.T) {
 	saved.AddCounter("hits", 527)
 	require.NoError(t, saved.Save())
 
-	restored := newStorage(t, path, time.Hour)
-	require.NoError(t, restored.Load())
+	restored := restoreStorage(t, path, time.Hour)
 
 	assert.Equal(t, saved.Snapshot(), restored.Snapshot())
 }
 
-func TestStorage_Load_MissingFileLeavesStorageEmpty(t *testing.T) {
-	st := newStorage(t, filepath.Join(t.TempDir(), "metrics.json"), time.Hour)
+func TestNew_WithoutRestoreIgnoresTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.json")
+	require.NoError(t, os.WriteFile(path, []byte(`[{"id":"temp","type":"gauge","value":36.6}]`), 0o644))
 
-	require.NoError(t, st.Load())
+	st := newStorage(t, path, time.Hour)
 
 	assert.Equal(t, metrics.Snapshot{Gauges: map[string]metrics.Gauge{}, Counters: map[string]metrics.Counter{}}, st.Snapshot())
 }
 
-func TestStorage_Load_BadFileIsAnError(t *testing.T) {
+func TestNew_RestoreFromMissingFileLeavesStorageEmpty(t *testing.T) {
+	st := restoreStorage(t, filepath.Join(t.TempDir(), "metrics.json"), time.Hour)
+
+	assert.Equal(t, metrics.Snapshot{Gauges: map[string]metrics.Gauge{}, Counters: map[string]metrics.Counter{}}, st.Snapshot())
+}
+
+func TestNew_RestoreFromBadFileIsAnError(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
@@ -63,22 +76,22 @@ func TestStorage_Load_BadFileIsAnError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "metrics.json")
 			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o644))
-			st := newStorage(t, path, time.Hour)
 
-			err := st.Load()
+			st, err := filestore.New(storage.NewMemStorage(), path, time.Hour, true, discard)
 
+			assert.Nil(t, st)
+			assert.ErrorContains(t, err, "restore metrics: ")
 			assert.ErrorContains(t, err, tt.wantErr)
 		})
 	}
 }
 
-func TestStorage_Load_DoesNotRewriteTheFile(t *testing.T) {
+func TestNew_RestoreDoesNotRewriteTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.json")
 	content := []byte(`[{"id":"temp","type":"gauge","value":36.6},{"id":"hits","type":"counter","delta":5}]`)
 	require.NoError(t, os.WriteFile(path, content, 0o644))
-	st := newStorage(t, path, 0)
 
-	require.NoError(t, st.Load())
+	restoreStorage(t, path, 0)
 
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -107,8 +120,7 @@ func TestStorage_Save_ReplacesOldContent(t *testing.T) {
 
 	require.NoError(t, st.Save())
 
-	restored := newStorage(t, path, time.Hour)
-	require.NoError(t, restored.Load())
+	restored := restoreStorage(t, path, time.Hour)
 	assert.Equal(t, metrics.Snapshot{
 		Gauges:   map[string]metrics.Gauge{},
 		Counters: map[string]metrics.Counter{"hits": 5},
@@ -139,7 +151,7 @@ func TestStorage_SetGauge_SavesAtOnceOnlyWithZeroInterval(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "metrics.json")
 			st := newStorage(t, path, tt.interval)
 
-			st.SetGauge("temp", 36.6)
+			require.NoError(t, st.SetGauge("temp", 36.6))
 
 			_, err := os.Stat(path)
 			assert.Equal(t, tt.wantFile, err == nil)
@@ -151,26 +163,26 @@ func TestStorage_AddCounter_ZeroIntervalWritesTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.json")
 	st := newStorage(t, path, 0)
 
-	st.AddCounter("hits", 5)
+	require.NoError(t, st.AddCounter("hits", 5))
 
-	restored := newStorage(t, path, time.Hour)
-	require.NoError(t, restored.Load())
+	restored := restoreStorage(t, path, time.Hour)
 	got, err := restored.Counter("hits")
 	require.NoError(t, err)
 	assert.Equal(t, metrics.Counter(5), got)
 }
 
-func TestStorage_SetGauge_FailedSaveIsLoggedAndValueKept(t *testing.T) {
+func TestStorage_SetGauge_FailedSaveReturnsErrorAndKeepsValue(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "metrics.json")
 	var logs bytes.Buffer
-	st, err := filestore.New(storage.NewMemStorage(), path, 0, slog.New(slog.NewTextHandler(&logs, nil)))
+	st, err := filestore.New(storage.NewMemStorage(), path, 0, false, slog.New(slog.NewTextHandler(&logs, nil)))
 	require.NoError(t, err)
 	require.NoError(t, os.Mkdir(path, 0o755))
 
-	st.SetGauge("temp", 36.6)
+	err = st.SetGauge("temp", 36.6)
 
-	assert.Contains(t, logs.String(), "save metrics")
+	assert.ErrorContains(t, err, "rename to "+path)
+	assert.Empty(t, logs.String(), "the handler logs the error it answers 500 with")
 	got, err := st.Gauge("temp")
 	require.NoError(t, err)
 	assert.Equal(t, metrics.Gauge(36.6), got)

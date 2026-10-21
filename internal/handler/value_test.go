@@ -2,6 +2,7 @@ package handler_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -40,6 +41,7 @@ func TestRouter_Value(t *testing.T) {
 		{name: "unclean path", storage: storedMetrics(), method: http.MethodGet, target: "/value/gauge/temp/", wantCode: http.StatusNotFound},
 		{name: "needlessly escaped name", storage: storedMetrics(), method: http.MethodGet, target: "/value/gauge/%74emp", wantCode: http.StatusNotFound},
 		{name: "storage failure", storage: &fakeStorage{readErr: errors.New("disk on fire")}, method: http.MethodGet, target: "/value/gauge/temp", wantCode: http.StatusInternalServerError},
+		{name: "wrapped not found is still 404", storage: &fakeStorage{readErr: fmt.Errorf("lookup: %w", metrics.ErrNotFound)}, method: http.MethodGet, target: "/value/gauge/temp", wantCode: http.StatusNotFound},
 		{name: "wrong method", storage: storedMetrics(), method: http.MethodPost, target: "/value/gauge/temp", wantCode: http.StatusMethodNotAllowed},
 	}
 	for _, tt := range tests {

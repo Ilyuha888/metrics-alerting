@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -17,13 +18,13 @@ func (h *handlers) updateJSON(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.save(m); err != nil {
-		writeError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	// Read back rather than echo the request: a counter answers its new total.
 	saved, err := h.load(m)
 	if err != nil {
-		writeError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	writeJSON(w, saved)
@@ -45,7 +46,7 @@ func decodeMetrics(w http.ResponseWriter, r *http.Request) (models.Metrics, bool
 		return models.Metrics{}, false
 	}
 	// Decode stops after the first value; only io.EOF proves nothing follows it.
-	if _, err := dec.Token(); err != io.EOF {
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		http.Error(w, "invalid JSON body: data after the object", http.StatusBadRequest)
 		return models.Metrics{}, false
 	}

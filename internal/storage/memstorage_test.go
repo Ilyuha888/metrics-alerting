@@ -83,7 +83,7 @@ func TestMemStorage_Gauge(t *testing.T) {
 
 			got, err := s.Gauge(tt.lookup)
 
-			assert.Equal(t, tt.wantErr, err)
+			assert.ErrorIs(t, err, tt.wantErr)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -110,7 +110,7 @@ func TestMemStorage_Counter(t *testing.T) {
 
 			got, err := s.Counter(tt.lookup)
 
-			assert.Equal(t, tt.wantErr, err)
+			assert.ErrorIs(t, err, tt.wantErr)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -122,7 +122,7 @@ func TestMemStorage_Counter_DoesNotSeeGauges(t *testing.T) {
 
 	_, err := s.Counter("only_gauge")
 
-	assert.Equal(t, metrics.ErrNotFound, err)
+	assert.ErrorIs(t, err, metrics.ErrNotFound)
 }
 
 func TestMemStorage_Snapshot_HoldsBothKinds(t *testing.T) {

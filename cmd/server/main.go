@@ -1,8 +1,8 @@
 package main
 
 import (
+	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -23,7 +23,7 @@ func run() error {
 	p, err := parseParams(os.Args[1:])
 
 	switch {
-	case err == flag.ErrHelp:
+	case errors.Is(err, flag.ErrHelp):
 		return nil
 	case err != nil:
 		return err
@@ -31,14 +31,9 @@ func run() error {
 
 	lg := logger.New(p.logLevel)
 	mem := storage.NewMemStorage()
-	st, err := filestore.New(mem, p.filePath, p.storeInterval, lg)
+	st, err := filestore.New(mem, p.filePath, p.storeInterval, p.restore, lg)
 	if err != nil {
 		return err
-	}
-	if p.restore {
-		if err := st.Load(); err != nil {
-			return fmt.Errorf("restore metrics: %w", err)
-		}
 	}
 	if p.storeInterval > 0 {
 		go st.SaveEvery()

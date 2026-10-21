@@ -37,7 +37,7 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.save(m); err != nil {
-		writeError(w, err)
+		h.writeError(w, err)
 		return
 	}
 

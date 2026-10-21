@@ -17,28 +17,32 @@ type call struct {
 }
 
 // fakeStorage records writes and applies them to the maps, since POST /update answers with
-// a read after the write; readErr fails every read.
+// a read after the write; readErr fails every read. writeErr fails every write after applying
+// it, as filestore keeps the value in memory when its save fails.
 type fakeStorage struct {
 	calls    []call
 	gauges   map[string]metrics.Gauge
 	counters map[string]metrics.Counter
 	readErr  error
+	writeErr error
 }
 
-func (f *fakeStorage) SetGauge(name string, v metrics.Gauge) {
+func (f *fakeStorage) SetGauge(name string, v metrics.Gauge) error {
 	f.calls = append(f.calls, call{kind: metrics.KindGauge, name: name, gauge: v})
 	if f.gauges == nil {
 		f.gauges = make(map[string]metrics.Gauge)
 	}
 	f.gauges[name] = v
+	return f.writeErr
 }
 
-func (f *fakeStorage) AddCounter(name string, v metrics.Counter) {
+func (f *fakeStorage) AddCounter(name string, v metrics.Counter) error {
 	f.calls = append(f.calls, call{kind: metrics.KindCounter, name: name, count: v})
 	if f.counters == nil {
 		f.counters = make(map[string]metrics.Counter)
 	}
 	f.counters[name] += v
+	return f.writeErr
 }
 
 func (f *fakeStorage) Gauge(name string) (metrics.Gauge, error) {

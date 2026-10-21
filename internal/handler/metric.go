@@ -24,17 +24,15 @@ func (h *handlers) save(m models.Metrics) error {
 		if m.Value == nil || m.Delta != nil {
 			return errBadValue
 		}
-		h.storage.SetGauge(m.ID, metrics.Gauge(*m.Value))
+		return h.storage.SetGauge(m.ID, metrics.Gauge(*m.Value))
 	case metrics.KindCounter:
 		if m.Delta == nil || m.Value != nil {
 			return errBadValue
 		}
-		h.storage.AddCounter(m.ID, metrics.Counter(*m.Delta))
+		return h.storage.AddCounter(m.ID, metrics.Counter(*m.Delta))
 	default:
 		return errUnknownKind
 	}
-
-	return nil
 }
 
 func (h *handlers) load(m models.Metrics) (models.Metrics, error) {
@@ -64,13 +62,15 @@ func (h *handlers) load(m models.Metrics) (models.Metrics, error) {
 	return out, nil
 }
 
-func writeError(w http.ResponseWriter, err error) {
-	switch err {
-	case metrics.ErrNotFound:
+func (h *handlers) writeError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, metrics.ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errUnknownKind, errBadValue:
+	case errors.Is(err, errUnknownKind), errors.Is(err, errBadValue):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
-		http.Error(w, "storage read failed", http.StatusInternalServerError)
+		// The client gets a generic text, so the log is the only place the cause shows up.
+		h.log.Error("storage failed", "err", err)
+		http.Error(w, "storage failed", http.StatusInternalServerError)
 	}
 }

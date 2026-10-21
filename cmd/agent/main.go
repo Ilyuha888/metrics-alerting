@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -20,7 +21,7 @@ func run() error {
 	p, err := parseParams(os.Args[1:])
 
 	switch {
-	case err == flag.ErrHelp:
+	case errors.Is(err, flag.ErrHelp):
 		return nil
 	case err != nil:
 		return err

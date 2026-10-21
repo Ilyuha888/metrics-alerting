@@ -10,7 +10,7 @@ func (h *handlers) valueJSON(w http.ResponseWriter, r *http.Request) {
 
 	loaded, err := h.load(m)
 	if err != nil {
-		writeError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	writeJSON(w, loaded)

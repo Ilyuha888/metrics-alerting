@@ -131,9 +131,9 @@ func TestParseParams(t *testing.T) {
 	}
 }
 
-// run tells -h apart with ==, so the help error must come back as flag.ErrHelp itself.
+// run tells -h apart with errors.Is, so the help error must be flag.ErrHelp or wrap it.
 func TestParseParams_Help_ReturnsErrHelp(t *testing.T) {
 	_, err := parseParams([]string{"-h"})
 
-	assert.Equal(t, flag.ErrHelp, err)
+	assert.ErrorIs(t, err, flag.ErrHelp)
 }

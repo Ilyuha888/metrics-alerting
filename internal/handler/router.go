@@ -12,8 +12,8 @@ import (
 )
 
 type Storage interface {
-	SetGauge(name string, v metrics.Gauge)
-	AddCounter(name string, v metrics.Counter)
+	SetGauge(name string, v metrics.Gauge) error
+	AddCounter(name string, v metrics.Counter) error
 	Gauge(name string) (metrics.Gauge, error)
 	Counter(name string) (metrics.Counter, error)
 	Snapshot() metrics.Snapshot
@@ -22,11 +22,12 @@ type Storage interface {
 // handlers holds what every endpoint needs, so each one is a plain method.
 type handlers struct {
 	storage Storage
+	log     *slog.Logger
 }
 
 // NewRouter returns the routes; patterns alone answer 404 for a missing name, 405 for a wrong method.
 func NewRouter(s Storage, lg *slog.Logger) http.Handler {
-	h := &handlers{storage: s}
+	h := &handlers{storage: s, log: lg}
 
 	r := chi.NewRouter()
 	// Logging goes first, so it also records the 404s, 405s and gzip rejections the rest answer.

@@ -20,8 +20,8 @@ import (
 
 type Storage struct {
 	// Embedded so Gauge, Counter and Snapshot come from MemStorage unchanged; only
-	// SetGauge and AddCounter are redefined, to save. A pointer, because a copy would
-	// carry its own mutex over the same maps.
+	// SetGauge and AddCounter are redefined, to save and return its error. A pointer,
+	// because a copy would carry its own mutex over the same maps.
 	*storage.MemStorage
 	path     string
 	interval time.Duration
@@ -32,15 +32,22 @@ type Storage struct {
 }
 
 // New creates the file's parent directory, so a first start with the default path works.
-func New(mem *storage.MemStorage, path string, interval time.Duration, lg *slog.Logger) (*Storage, error) {
+// With restore it also loads the file, so the caller gets a storage that is ready to serve.
+func New(mem *storage.MemStorage, path string, interval time.Duration, restore bool, lg *slog.Logger) (*Storage, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create dir for %s: %w", path, err)
 	}
-	return &Storage{MemStorage: mem, path: path, interval: interval, log: lg}, nil
+	s := &Storage{MemStorage: mem, path: path, interval: interval, log: lg}
+	if restore {
+		if err := s.load(); err != nil {
+			return nil, fmt.Errorf("restore metrics: %w", err)
+		}
+	}
+	return s, nil
 }
 
-// Load treats a missing file as a first start and returns nil.
-func (s *Storage) Load() error {
+// load treats a missing file as a first start and returns nil.
+func (s *Storage) load() error {
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -131,25 +138,23 @@ func toModels(snap metrics.Snapshot) []models.Metrics {
 	return list
 }
 
-func (s *Storage) SetGauge(name string, v metrics.Gauge) {
+func (s *Storage) SetGauge(name string, v metrics.Gauge) error {
 	s.MemStorage.SetGauge(name, v)
-	s.saveIfSync()
+	return s.saveIfSync()
 }
 
-func (s *Storage) AddCounter(name string, v metrics.Counter) {
+func (s *Storage) AddCounter(name string, v metrics.Counter) error {
 	s.MemStorage.AddCounter(name, v)
-	s.saveIfSync()
+	return s.saveIfSync()
 }
 
-// saveIfSync logs a failed save instead of returning it: the value is already in
-// memory, and the handler interface has no error to report it through.
-func (s *Storage) saveIfSync() {
+// saveIfSync returns a failed save without logging it, since the handler logs the error it
+// answers 500 with. The value stays in memory either way, so a client retry adds a counter twice.
+func (s *Storage) saveIfSync() error {
 	if s.interval != 0 {
-		return
+		return nil
 	}
-	if err := s.Save(); err != nil {
-		s.log.Error("save metrics", "err", err)
-	}
+	return s.Save()
 }
 
 // SaveEvery never returns; run it in its own goroutine.
