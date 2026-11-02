@@ -68,10 +68,8 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 
 - One branch per increment, named `iterN`. Branch increment N+1 off increment N, not off
   `main`.
-- One pull request per increment. Do not merge it; `main` receives an increment only after
-  a reviewer accepts it.
-- Each `iterN` PR targets `iter(N-1)`; before a sprint's review, retarget its last PR to
-  `main`.
+- One pull request per increment, added to the sprint's GitHub stack, so the reviewer reviews the sprint at its top PR and the stack merges in one action. Do not merge it; `main` receives an increment only after a reviewer accepts it.
+- The first PR of a sprint targets `main`; each next `iterN` PR targets `iter(N-1)`.
 - The repo owner merges, with a merge commit, never squash; fix a pushed lower branch with new
   commits only.
 - Commit subject only, English, imperative. Add a body when the "Why" is not visible in the
