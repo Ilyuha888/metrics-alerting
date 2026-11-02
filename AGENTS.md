@@ -22,7 +22,8 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/storage/` — `MemStorage`.
 - `internal/filestore/` — `Storage`, which wraps `MemStorage` and saves it to a JSON file
   periodically or on every update, and restores it at start.
-- `internal/handler/` — the HTTP layer on chi. It declares the `Storage` interface it needs.
+- `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
+  interfaces it needs.
 - `internal/agent/` — collector, sender and the polling loop.
 
 Do not create a directory before something goes in it. Git does not track empty
@@ -77,7 +78,7 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 
 ## Conventions
 
-- Standard library only. Add a dependency in the sprint that introduces it, not earlier.
+- Prefer the standard library. Add a dependency in the sprint that introduces it, not earlier.
 - Keep `main` thin: parse flags, build dependencies, call `run() error`. `os.Exit` skips
   deferred calls, so it belongs in `main` and nowhere deeper.
 - Errors are returned, not panicked, and wrapped with `fmt.Errorf("...: %w", err)`.

@@ -93,7 +93,7 @@ func TestRouter_Update(t *testing.T) {
 			wantCalls: []call{{kind: metrics.KindGauge, name: "a b", gauge: 1}},
 		},
 		{
-			name: "unknown path", method: http.MethodPost, target: "/ping",
+			name: "unknown path", method: http.MethodPost, target: "/unknown",
 			wantCode: http.StatusNotFound,
 		},
 		{
@@ -132,7 +132,7 @@ func TestRouter_Update(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeStorage{}
-			router := handler.NewRouter(fake, discardLogger)
+			router := handler.NewRouter(fake, nil, discardLogger)
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			w := httptest.NewRecorder()
 
@@ -145,7 +145,7 @@ func TestRouter_Update(t *testing.T) {
 }
 
 func TestRouter_Update_AllowHeaderOnWrongMethod(t *testing.T) {
-	router := handler.NewRouter(&fakeStorage{}, discardLogger)
+	router := handler.NewRouter(&fakeStorage{}, nil, discardLogger)
 	req := httptest.NewRequest(http.MethodGet, "/update/counter/hits/1", nil)
 	w := httptest.NewRecorder()
 
@@ -172,7 +172,7 @@ func TestRouter_Update_FailedWriteAnswers500AndLogsTheCause(t *testing.T) {
 			var buf bytes.Buffer
 			lg := slog.New(slog.NewJSONHandler(&buf, nil))
 			fake := &fakeStorage{writeErr: errors.New("disk full")}
-			router := handler.NewRouter(fake, lg)
+			router := handler.NewRouter(fake, nil, lg)
 			req := httptest.NewRequest(http.MethodPost, tt.target, strings.NewReader(tt.body))
 			if tt.contentType != "" {
 				req.Header.Set("Content-Type", tt.contentType)

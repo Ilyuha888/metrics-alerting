@@ -17,6 +17,7 @@ type params struct {
 	storeInterval time.Duration
 	filePath      string
 	restore       bool
+	databaseDSN   string
 }
 
 // Strings, so an env value goes through the same Set as the flag.
@@ -25,6 +26,7 @@ type envParams struct {
 	StoreInterval   string `env:"STORE_INTERVAL"`
 	FileStoragePath string `env:"FILE_STORAGE_PATH"`
 	Restore         string `env:"RESTORE"`
+	DatabaseDSN     string `env:"DATABASE_DSN"`
 }
 
 func parseParams(args []string) (params, error) {
@@ -40,6 +42,7 @@ func parseParams(args []string) (params, error) {
 	fs.StringVar(&p.filePath, "f", "dumps/metrics.json", "File to store metrics in")
 	// A bool flag takes its value only as -r=false; "-r false" ends flag parsing.
 	fs.BoolVar(&p.restore, "r", true, "Restore metrics from the file at start")
+	fs.StringVar(&p.databaseDSN, "d", "", "PostgreSQL connection string")
 	if err := fs.Parse(args); err != nil {
 		return p, err
 	}
@@ -70,6 +73,9 @@ func parseParams(args []string) (params, error) {
 			return p, fmt.Errorf("RESTORE: %w", err)
 		}
 		p.restore = restore
+	}
+	if e.DatabaseDSN != "" {
+		p.databaseDSN = e.DatabaseDSN
 	}
 
 	return p, nil

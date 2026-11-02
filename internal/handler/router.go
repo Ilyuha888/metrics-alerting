@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"path"
@@ -19,15 +20,21 @@ type Storage interface {
 	Snapshot() metrics.Snapshot
 }
 
+// TODO: revisit once metrics are stored in Postgres; Ping may then belong on Storage.
+type Pinger interface {
+	PingContext(ctx context.Context) error
+}
+
 // handlers holds what every endpoint needs, so each one is a plain method.
 type handlers struct {
 	storage Storage
+	db      Pinger
 	log     *slog.Logger
 }
 
 // NewRouter returns the routes; patterns alone answer 404 for a missing name, 405 for a wrong method.
-func NewRouter(s Storage, lg *slog.Logger) http.Handler {
-	h := &handlers{storage: s, log: lg}
+func NewRouter(s Storage, db Pinger, lg *slog.Logger) http.Handler {
+	h := &handlers{storage: s, db: db, log: lg}
 
 	r := chi.NewRouter()
 	// Logging goes first, so it also records the 404s, 405s and gzip rejections the rest answer.
@@ -39,6 +46,7 @@ func NewRouter(s Storage, lg *slog.Logger) http.Handler {
 	r.Post("/value/", h.valueJSON)
 	r.Post("/update/{kind}/{name}/{value}", h.update)
 	r.Get("/value/{kind}/{name}", h.value)
+	r.Get("/ping", h.ping)
 	r.Get("/", h.index)
 	return r
 }

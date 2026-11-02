@@ -14,7 +14,7 @@ import (
 
 func getIndex(t *testing.T, s *fakeStorage) string {
 	t.Helper()
-	router := handler.NewRouter(s, discardLogger)
+	router := handler.NewRouter(s, nil, discardLogger)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 

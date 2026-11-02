@@ -16,7 +16,7 @@ func TestParseParams(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
-		// A variable missing from env is unset for the case, so the developer's own ADDRESS, STORE_INTERVAL, FILE_STORAGE_PATH and RESTORE cannot leak in.
+		// A variable missing from env is unset for the case, so the developer's own ADDRESS, STORE_INTERVAL, FILE_STORAGE_PATH, RESTORE and DATABASE_DSN cannot leak in.
 		env     map[string]string
 		want    params
 		wantErr string
@@ -123,10 +123,30 @@ func TestParseParams(t *testing.T) {
 			env:     map[string]string{"RESTORE": "yes"},
 			wantErr: `RESTORE: strconv.ParseBool: parsing "yes"`,
 		},
+		{
+			name: "database DSN is empty by default",
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, filePath: "dumps/metrics.json", restore: true, databaseDSN: ""},
+		},
+		{
+			name: "database DSN flag",
+			args: []string{"-d", "postgres://flag/db"},
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, filePath: "dumps/metrics.json", restore: true, databaseDSN: "postgres://flag/db"},
+		},
+		{
+			name: "env database DSN beats default",
+			env:  map[string]string{"DATABASE_DSN": "postgres://env/db"},
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, filePath: "dumps/metrics.json", restore: true, databaseDSN: "postgres://env/db"},
+		},
+		{
+			name: "env database DSN beats flag",
+			args: []string{"-d", "postgres://flag/db"},
+			env:  map[string]string{"DATABASE_DSN": "postgres://env/db"},
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, filePath: "dumps/metrics.json", restore: true, databaseDSN: "postgres://env/db"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, k := range []string{"ADDRESS", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE"} {
+			for _, k := range []string{"ADDRESS", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE", "DATABASE_DSN"} {
 				v, ok := tt.env[k]
 				// Setenv first so the test restores the developer's value; then unset if the case omits it.
 				t.Setenv(k, v)
