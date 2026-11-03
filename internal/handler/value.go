@@ -10,7 +10,7 @@ import (
 )
 
 func (h *handlers) value(w http.ResponseWriter, r *http.Request) {
-	m, err := h.load(models.Metrics{ID: r.PathValue("name"), MType: metrics.Kind(r.PathValue("kind"))})
+	m, err := h.load(r.Context(), models.Metrics{ID: r.PathValue("name"), MType: metrics.Kind(r.PathValue("kind"))})
 	if err != nil {
 		h.writeError(w, err)
 		return

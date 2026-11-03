@@ -8,7 +8,7 @@ func (h *handlers) valueJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loaded, err := h.load(m)
+	loaded, err := h.load(r.Context(), m)
 	if err != nil {
 		h.writeError(w, err)
 		return

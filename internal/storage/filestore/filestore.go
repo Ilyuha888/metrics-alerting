@@ -1,8 +1,9 @@
-// Package filestore persists a MemStorage to a JSON file.
+// Package filestore persists a memstorage.Storage to a JSON file.
 package filestore
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,14 +16,14 @@ import (
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/Ilyuha888/metrics-alerting/internal/models"
-	"github.com/Ilyuha888/metrics-alerting/internal/storage"
+	"github.com/Ilyuha888/metrics-alerting/internal/storage/memstorage"
 )
 
 type Storage struct {
-	// Embedded so Gauge, Counter and Snapshot come from MemStorage unchanged; only
+	// Embedded so Gauge, Counter and Snapshot come from memstorage.Storage unchanged; only
 	// SetGauge and AddCounter are redefined, to save and return its error. A pointer,
 	// because a copy would carry its own mutex over the same maps.
-	*storage.MemStorage
+	*memstorage.Storage
 	path     string
 	interval time.Duration
 	log      *slog.Logger
@@ -31,13 +32,13 @@ type Storage struct {
 	saveMu sync.Mutex
 }
 
-// New creates the file's parent directory, so a first start with the default path works.
+// New creates the file's parent directory, so a first start with a nested path works.
 // With restore it also loads the file, so the caller gets a storage that is ready to serve.
-func New(mem *storage.MemStorage, path string, interval time.Duration, restore bool, lg *slog.Logger) (*Storage, error) {
+func New(mem *memstorage.Storage, path string, interval time.Duration, restore bool, lg *slog.Logger) (*Storage, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create dir for %s: %w", path, err)
 	}
-	s := &Storage{MemStorage: mem, path: path, interval: interval, log: lg}
+	s := &Storage{Storage: mem, path: path, interval: interval, log: lg}
 	if restore {
 		if err := s.load(); err != nil {
 			return nil, fmt.Errorf("restore metrics: %w", err)
@@ -61,19 +62,23 @@ func (s *Storage) load() error {
 		return fmt.Errorf("parse %s: %w", s.path, err)
 	}
 
-	// Writes go to the embedded MemStorage, not s, so a restore does not save the file it reads.
+	// Writes go to the embedded memstorage.Storage, not s, so a restore does not save the file it reads.
 	for _, m := range list {
 		switch m.MType {
 		case metrics.KindGauge:
 			if m.Value == nil {
 				return fmt.Errorf("%s: gauge %q has no value", s.path, m.ID)
 			}
-			s.MemStorage.SetGauge(m.ID, metrics.Gauge(*m.Value))
+			if err := s.Storage.SetGauge(context.Background(), m.ID, metrics.Gauge(*m.Value)); err != nil {
+				return fmt.Errorf("%s: gauge %q: %w", s.path, m.ID, err)
+			}
 		case metrics.KindCounter:
 			if m.Delta == nil {
 				return fmt.Errorf("%s: counter %q has no delta", s.path, m.ID)
 			}
-			s.MemStorage.AddCounter(m.ID, metrics.Counter(*m.Delta))
+			if err := s.Storage.AddCounter(context.Background(), m.ID, metrics.Counter(*m.Delta)); err != nil {
+				return fmt.Errorf("%s: counter %q: %w", s.path, m.ID, err)
+			}
 		default:
 			return fmt.Errorf("%s: metric %q has unknown type %q", s.path, m.ID, m.MType)
 		}
@@ -87,7 +92,11 @@ func (s *Storage) Save() error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 
-	data, err := json.MarshalIndent(toModels(s.Snapshot()), "", "  ")
+	snap, err := s.Snapshot(context.Background())
+	if err != nil {
+		return fmt.Errorf("snapshot metrics: %w", err)
+	}
+	data, err := json.MarshalIndent(toModels(snap), "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode metrics: %w", err)
 	}
@@ -138,13 +147,17 @@ func toModels(snap metrics.Snapshot) []models.Metrics {
 	return list
 }
 
-func (s *Storage) SetGauge(name string, v metrics.Gauge) error {
-	s.MemStorage.SetGauge(name, v)
+func (s *Storage) SetGauge(ctx context.Context, name string, v metrics.Gauge) error {
+	if err := s.Storage.SetGauge(ctx, name, v); err != nil {
+		return err
+	}
 	return s.saveIfSync()
 }
 
-func (s *Storage) AddCounter(name string, v metrics.Counter) error {
-	s.MemStorage.AddCounter(name, v)
+func (s *Storage) AddCounter(ctx context.Context, name string, v metrics.Counter) error {
+	if err := s.Storage.AddCounter(ctx, name, v); err != nil {
+		return err
+	}
 	return s.saveIfSync()
 }
 

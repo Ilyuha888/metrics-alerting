@@ -13,14 +13,13 @@ import (
 )
 
 type Storage interface {
-	SetGauge(name string, v metrics.Gauge) error
-	AddCounter(name string, v metrics.Counter) error
-	Gauge(name string) (metrics.Gauge, error)
-	Counter(name string) (metrics.Counter, error)
-	Snapshot() metrics.Snapshot
+	SetGauge(ctx context.Context, name string, v metrics.Gauge) error
+	AddCounter(ctx context.Context, name string, v metrics.Counter) error
+	Gauge(ctx context.Context, name string) (metrics.Gauge, error)
+	Counter(ctx context.Context, name string) (metrics.Counter, error)
+	Snapshot(ctx context.Context) (metrics.Snapshot, error)
 }
 
-// TODO: revisit once metrics are stored in Postgres; Ping may then belong on Storage.
 type Pinger interface {
 	PingContext(ctx context.Context) error
 }

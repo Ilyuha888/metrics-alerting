@@ -1,41 +1,44 @@
-// Package storage keeps metric values for the lifetime of the process.
-package storage
+// Package memstorage keeps metric values for the lifetime of the process.
+package memstorage
 
 import (
+	"context"
 	"maps"
 	"sync"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 )
 
-// MemStorage keeps gauges and counters in separate maps. A metric is
+// Storage keeps gauges and counters in separate maps. A metric is
 // therefore identified by name and kind together.
-type MemStorage struct {
+type Storage struct {
 	mu       sync.Mutex
 	gauges   map[string]metrics.Gauge
 	counters map[string]metrics.Counter
 }
 
-func NewMemStorage() *MemStorage {
-	return &MemStorage{
+func New() *Storage {
+	return &Storage{
 		gauges:   make(map[string]metrics.Gauge),
 		counters: make(map[string]metrics.Counter),
 	}
 }
 
-func (s *MemStorage) SetGauge(name string, v metrics.Gauge) {
+func (s *Storage) SetGauge(_ context.Context, name string, v metrics.Gauge) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gauges[name] = v
+	return nil
 }
 
-func (s *MemStorage) AddCounter(name string, v metrics.Counter) {
+func (s *Storage) AddCounter(_ context.Context, name string, v metrics.Counter) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.counters[name] += v
+	return nil
 }
 
-func (s *MemStorage) Gauge(name string) (metrics.Gauge, error) {
+func (s *Storage) Gauge(_ context.Context, name string) (metrics.Gauge, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, ok := s.gauges[name]
@@ -45,7 +48,7 @@ func (s *MemStorage) Gauge(name string) (metrics.Gauge, error) {
 	return v, nil
 }
 
-func (s *MemStorage) Counter(name string) (metrics.Counter, error) {
+func (s *Storage) Counter(_ context.Context, name string) (metrics.Counter, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, ok := s.counters[name]
@@ -56,11 +59,11 @@ func (s *MemStorage) Counter(name string) (metrics.Counter, error) {
 }
 
 // Snapshot copies both maps, so the caller never holds live state.
-func (s *MemStorage) Snapshot() metrics.Snapshot {
+func (s *Storage) Snapshot(_ context.Context) (metrics.Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return metrics.Snapshot{
 		Gauges:   maps.Clone(s.gauges),
 		Counters: maps.Clone(s.counters),
-	}
+	}, nil
 }

@@ -2,6 +2,7 @@
 package handler_test
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
@@ -18,16 +19,19 @@ type call struct {
 
 // fakeStorage records writes and applies them to the maps, since POST /update answers with
 // a read after the write; readErr fails every read. writeErr fails every write after applying
-// it, as filestore keeps the value in memory when its save fails.
+// it, as filestore keeps the value in memory when its save fails. ctxErrs holds the context's
+// error at each call: once the handler returns, a deferred cancel would hide what the call saw.
 type fakeStorage struct {
 	calls    []call
 	gauges   map[string]metrics.Gauge
 	counters map[string]metrics.Counter
 	readErr  error
 	writeErr error
+	ctxErrs  []error
 }
 
-func (f *fakeStorage) SetGauge(name string, v metrics.Gauge) error {
+func (f *fakeStorage) SetGauge(ctx context.Context, name string, v metrics.Gauge) error {
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	f.calls = append(f.calls, call{kind: metrics.KindGauge, name: name, gauge: v})
 	if f.gauges == nil {
 		f.gauges = make(map[string]metrics.Gauge)
@@ -36,7 +40,8 @@ func (f *fakeStorage) SetGauge(name string, v metrics.Gauge) error {
 	return f.writeErr
 }
 
-func (f *fakeStorage) AddCounter(name string, v metrics.Counter) error {
+func (f *fakeStorage) AddCounter(ctx context.Context, name string, v metrics.Counter) error {
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	f.calls = append(f.calls, call{kind: metrics.KindCounter, name: name, count: v})
 	if f.counters == nil {
 		f.counters = make(map[string]metrics.Counter)
@@ -45,7 +50,8 @@ func (f *fakeStorage) AddCounter(name string, v metrics.Counter) error {
 	return f.writeErr
 }
 
-func (f *fakeStorage) Gauge(name string) (metrics.Gauge, error) {
+func (f *fakeStorage) Gauge(ctx context.Context, name string) (metrics.Gauge, error) {
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	if f.readErr != nil {
 		return 0, f.readErr
 	}
@@ -56,7 +62,8 @@ func (f *fakeStorage) Gauge(name string) (metrics.Gauge, error) {
 	return v, nil
 }
 
-func (f *fakeStorage) Counter(name string) (metrics.Counter, error) {
+func (f *fakeStorage) Counter(ctx context.Context, name string) (metrics.Counter, error) {
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	if f.readErr != nil {
 		return 0, f.readErr
 	}
@@ -67,6 +74,10 @@ func (f *fakeStorage) Counter(name string) (metrics.Counter, error) {
 	return v, nil
 }
 
-func (f *fakeStorage) Snapshot() metrics.Snapshot {
-	return metrics.Snapshot{Gauges: f.gauges, Counters: f.counters}
+func (f *fakeStorage) Snapshot(ctx context.Context) (metrics.Snapshot, error) {
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
+	if f.readErr != nil {
+		return metrics.Snapshot{}, f.readErr
+	}
+	return metrics.Snapshot{Gauges: f.gauges, Counters: f.counters}, nil
 }

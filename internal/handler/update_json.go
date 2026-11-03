@@ -17,12 +17,12 @@ func (h *handlers) updateJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.save(m); err != nil {
+	if err := h.save(r.Context(), m); err != nil {
 		h.writeError(w, err)
 		return
 	}
 	// Read back rather than echo the request: a counter answers its new total.
-	saved, err := h.load(m)
+	saved, err := h.load(r.Context(), m)
 	if err != nil {
 		h.writeError(w, err)
 		return

@@ -19,11 +19,14 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default;
   `Seconds`, the bare-seconds interval flag type.
 - `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-l` flag.
-- `internal/storage/` — `MemStorage`.
-- `internal/filestore/` — `Storage`, which wraps `MemStorage` and saves it to a JSON file
+- `internal/storage/memstorage/` — `Storage`, the in-memory `handler.Storage`.
+- `internal/storage/filestore/` — `Storage`, which wraps `memstorage.Storage` and saves it to a JSON file
   periodically or on every update, and restores it at start.
+- `internal/storage/database/` — `Open`, which returns a pinged `*sql.DB` with the embedded goose
+  migrations from `migrations/` applied.
+- `internal/storage/pgstore/` — `Storage`, the `handler.Storage` on PostgreSQL, over the pool from `database`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
-  interfaces it needs.
+  interfaces it needs, and passes the request's context to both.
 - `internal/agent/` — collector, sender and the polling loop.
 
 Do not create a directory before something goes in it. Git does not track empty
@@ -36,6 +39,13 @@ go build ./cmd/...        # build both binaries
 go test ./...             # tests
 go vet ./...              # what CI runs, minus the Practicum vettool
 gofmt -l -w .             # format
+```
+
+Tests in `internal/storage/database` and `internal/storage/pgstore` need a real PostgreSQL. They read a URL-form
+DSN from `TEST_DATABASE_DSN`, create and drop their own databases, and skip without it:
+
+```sh
+TEST_DATABASE_DSN='postgres://postgres:postgres@localhost:5432/praktikum?sslmode=disable' go test ./...
 ```
 
 CI builds each binary from inside its own directory, so the artifacts are
