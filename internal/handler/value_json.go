@@ -1,10 +1,14 @@
 package handler
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/Ilyuha888/metrics-alerting/internal/models"
+)
 
 func (h *handlers) valueJSON(w http.ResponseWriter, r *http.Request) {
-	m, ok := decodeMetrics(w, r)
-	if !ok {
+	var m models.Metrics
+	if !decodeJSON(w, r, &m) {
 		return
 	}
 

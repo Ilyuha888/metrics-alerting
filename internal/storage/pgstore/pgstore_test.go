@@ -255,6 +255,9 @@ var everyMethod = []struct {
 	{name: "Gauge", call: func(ctx context.Context, s *pgstore.Storage) error { _, err := s.Gauge(ctx, "x"); return err }},
 	{name: "Counter", call: func(ctx context.Context, s *pgstore.Storage) error { _, err := s.Counter(ctx, "x"); return err }},
 	{name: "Snapshot", call: func(ctx context.Context, s *pgstore.Storage) error { _, err := s.Snapshot(ctx); return err }},
+	{name: "UpdateBatch", call: func(ctx context.Context, s *pgstore.Storage) error {
+		return s.UpdateBatch(ctx, metrics.Batch{Gauges: map[string]metrics.Gauge{"x": 1}})
+	}},
 }
 
 func TestStorage_CancelledContext_ReturnsError(t *testing.T) {
@@ -269,8 +272,8 @@ func TestStorage_CancelledContext_ReturnsError(t *testing.T) {
 	}
 }
 
-// An exclusive table lock blocks reads too, so all five methods wait on it until their own
-// timeout ends. They wait in parallel, so the test takes one timeout, not five.
+// An exclusive table lock blocks reads too, so all six methods wait on it until their own
+// timeout ends. They wait in parallel, so the test takes one timeout, not six.
 func TestStorage_StuckDatabase_TimesOutUnderOwnTimeout(t *testing.T) {
 	db := newDatabase(t)
 	s := pgstore.New(db)
@@ -305,4 +308,167 @@ func TestStorage_AddCounter_OverflowIsAnErrorAndKeepsTheValue(t *testing.T) {
 	got, err := s.Counter(t.Context(), "hits")
 	require.NoError(t, err)
 	assert.Equal(t, metrics.Counter(math.MaxInt64), got)
+}
+
+func TestStorage_UpdateBatch_AppliesTheBatch(t *testing.T) {
+	stored := metrics.Snapshot{
+		Gauges:   map[string]metrics.Gauge{"temp": 36.6},
+		Counters: map[string]metrics.Counter{"hits": 527},
+	}
+	tests := []struct {
+		name  string
+		batch metrics.Batch
+		want  metrics.Snapshot
+	}{
+		{
+			name: "gauge replaces and counter adds",
+			batch: metrics.Batch{
+				Gauges:   map[string]metrics.Gauge{"temp": 37.2},
+				Counters: map[string]metrics.Counter{"hits": 3},
+			},
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 37.2},
+				Counters: map[string]metrics.Counter{"hits": 530},
+			},
+		},
+		{
+			name: "both kinds with new names",
+			batch: metrics.Batch{
+				Gauges:   map[string]metrics.Gauge{"load": 1.5, "free": 0.12345678901234568},
+				Counters: map[string]metrics.Counter{"errors": 2, "big": math.MaxInt64},
+			},
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 36.6, "load": 1.5, "free": 0.12345678901234568},
+				Counters: map[string]metrics.Counter{"hits": 527, "errors": 2, "big": math.MaxInt64},
+			},
+		},
+		{
+			name:  "one name as both kinds",
+			batch: metrics.Batch{Gauges: map[string]metrics.Gauge{"hits": 1.5}, Counters: map[string]metrics.Counter{"temp": 7}},
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 36.6, "hits": 1.5},
+				Counters: map[string]metrics.Counter{"hits": 527, "temp": 7},
+			},
+		},
+		{
+			name:  "only gauges with no counter map",
+			batch: metrics.Batch{Gauges: map[string]metrics.Gauge{"temp": 1}},
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 1},
+				Counters: map[string]metrics.Counter{"hits": 527},
+			},
+		},
+		{
+			name:  "only counters with an empty gauge map",
+			batch: metrics.Batch{Gauges: map[string]metrics.Gauge{}, Counters: map[string]metrics.Counter{"hits": 1}},
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 36.6},
+				Counters: map[string]metrics.Counter{"hits": 528},
+			},
+		},
+		{name: "empty batch", want: stored},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := pgstore.New(newDatabase(t))
+			require.NoError(t, s.SetGauge(t.Context(), "temp", 36.6))
+			require.NoError(t, s.AddCounter(t.Context(), "hits", 527))
+
+			require.NoError(t, s.UpdateBatch(t.Context(), tt.batch))
+
+			snap, err := s.Snapshot(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, snap)
+		})
+	}
+}
+
+func TestStorage_UpdateBatch_CounterOverflowLeavesTheGaugesUnwritten(t *testing.T) {
+	s := pgstore.New(newDatabase(t))
+	require.NoError(t, s.SetGauge(t.Context(), "temp", 36.6))
+	require.NoError(t, s.AddCounter(t.Context(), "hits", math.MaxInt64))
+
+	err := s.UpdateBatch(t.Context(), metrics.Batch{
+		Gauges:   map[string]metrics.Gauge{"temp": 1, "load": 2},
+		Counters: map[string]metrics.Counter{"hits": 1, "errors": 1},
+	})
+
+	assert.ErrorContains(t, err, "bigint out of range")
+	assert.ErrorContains(t, err, "batch counters")
+	snap, err := s.Snapshot(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, metrics.Snapshot{
+		Gauges:   map[string]metrics.Gauge{"temp": 36.6},
+		Counters: map[string]metrics.Counter{"hits": math.MaxInt64},
+	}, snap)
+}
+
+func TestStorage_UpdateBatch_FailedBatchKeepsTheConnection(t *testing.T) {
+	db := newDatabase(t)
+	db.SetMaxOpenConns(1)
+	s := pgstore.New(db)
+	require.NoError(t, s.AddCounter(t.Context(), "hits", math.MaxInt64))
+	backendPID := func() int {
+		var pid int
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT pg_backend_pid()`).Scan(&pid))
+		return pid
+	}
+	before := backendPID()
+
+	err := s.UpdateBatch(t.Context(), metrics.Batch{Counters: map[string]metrics.Counter{"hits": 1}})
+
+	require.ErrorContains(t, err, "bigint out of range")
+	assert.Equal(t, before, backendPID())
+}
+
+func TestStorage_Snapshot_KeepsTheConnection(t *testing.T) {
+	db := newDatabase(t)
+	db.SetMaxOpenConns(1)
+	s := pgstore.New(db)
+	backendPID := func() int {
+		var pid int
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT pg_backend_pid()`).Scan(&pid))
+		return pid
+	}
+	before := backendPID()
+
+	_, err := s.Snapshot(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, before, backendPID())
+}
+
+func TestStorage_UpdateBatch_ParallelBatchesOverOneSetOfNamesAllLand(t *testing.T) {
+	const writers, batches, names = 8, 10, 29
+	s := pgstore.New(newDatabase(t))
+
+	all := make([]string, names)
+	seed := metrics.Batch{Gauges: make(map[string]metrics.Gauge), Counters: make(map[string]metrics.Counter)}
+	for i := range all {
+		all[i] = fmt.Sprintf("m%02d", i)
+		seed.Gauges[all[i]] = 0
+		seed.Counters[all[i]] = 0
+	}
+	require.NoError(t, s.UpdateBatch(t.Context(), seed))
+
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Go(func() {
+			for range batches {
+				b := metrics.Batch{Gauges: make(map[string]metrics.Gauge), Counters: make(map[string]metrics.Counter)}
+				for _, name := range all {
+					b.Gauges[name] = 1
+					b.Counters[name] = 1
+				}
+				assert.NoError(t, s.UpdateBatch(t.Context(), b))
+			}
+		})
+	}
+	wg.Wait()
+
+	snap, err := s.Snapshot(t.Context())
+	require.NoError(t, err)
+	for _, name := range all {
+		assert.Equal(t, metrics.Counter(writers*batches), snap.Counters[name], name)
+	}
 }

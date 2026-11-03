@@ -12,8 +12,8 @@ import (
 )
 
 func (h *handlers) updateJSON(w http.ResponseWriter, r *http.Request) {
-	m, ok := decodeMetrics(w, r)
-	if !ok {
+	var m models.Metrics
+	if !decodeJSON(w, r, &m) {
 		return
 	}
 
@@ -30,27 +30,37 @@ func (h *handlers) updateJSON(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, saved)
 }
 
-func decodeMetrics(w http.ResponseWriter, r *http.Request) (models.Metrics, bool) {
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	// ParseMediaType, so "application/json; charset=utf-8" passes too.
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
-		return models.Metrics{}, false
+		return false
 	}
 
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	var m models.Metrics
-	if err := dec.Decode(&m); err != nil {
-		http.Error(w, fmt.Sprintf("invalid JSON body: %v", err), http.StatusBadRequest)
-		return models.Metrics{}, false
+	if err := dec.Decode(dst); err != nil {
+		rejectBody(w, err, fmt.Sprintf("invalid JSON body: %v", err))
+		return false
 	}
 	// Decode stops after the first value; only io.EOF proves nothing follows it.
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid JSON body: data after the object", http.StatusBadRequest)
-		return models.Metrics{}, false
+		rejectBody(w, err, "invalid JSON body: data after the JSON value")
+		return false
 	}
-	return m, true
+	return true
+}
+
+// rejectBody answers 413 when a size limit stopped the read, since the JSON may be fine; the
+// limit can also trip after the first value, on padding that follows it.
+func rejectBody(w http.ResponseWriter, err error, invalid string) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		http.Error(w, fmt.Sprintf("body is over %d bytes", tooLarge.Limit), http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, invalid, http.StatusBadRequest)
 }
 
 func writeJSON(w http.ResponseWriter, m models.Metrics) {

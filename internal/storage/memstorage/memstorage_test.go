@@ -2,6 +2,7 @@
 package memstorage
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 
@@ -200,4 +201,99 @@ func TestStorage_Snapshot_ConcurrentWithWritesIsSafe(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, metrics.Counter(writers*reports), s.counters["hits"])
+}
+
+func TestStorage_UpdateBatch_AppliesBothKinds(t *testing.T) {
+	tests := []struct {
+		name  string
+		batch metrics.Batch
+		want  metrics.Snapshot
+	}{
+		{
+			name: "gauge replaces and counter adds to the stored value",
+			batch: metrics.Batch{
+				Gauges:   map[string]metrics.Gauge{"temp": 37.2},
+				Counters: map[string]metrics.Counter{"hits": 3},
+			},
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 37.2},
+				Counters: map[string]metrics.Counter{"hits": 530},
+			},
+		},
+		{
+			name: "new names are added",
+			batch: metrics.Batch{
+				Gauges:   map[string]metrics.Gauge{"load": 1.5},
+				Counters: map[string]metrics.Counter{"errors": 2},
+			},
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 36.6, "load": 1.5},
+				Counters: map[string]metrics.Counter{"hits": 527, "errors": 2},
+			},
+		},
+		{
+			name: "an empty batch leaves everything",
+			want: metrics.Snapshot{
+				Gauges:   map[string]metrics.Gauge{"temp": 36.6},
+				Counters: map[string]metrics.Counter{"hits": 527},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New()
+			s.SetGauge(t.Context(), "temp", 36.6)
+			s.AddCounter(t.Context(), "hits", 527)
+
+			require.NoError(t, s.UpdateBatch(t.Context(), tt.batch))
+
+			assert.Equal(t, tt.want, snapshot(t, s))
+		})
+	}
+}
+
+func TestStorage_UpdateBatch_SnapshotSeesAllOfABatchOrNone(t *testing.T) {
+	const names, snapshots = 50, 2000
+	s := New()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 1; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b := metrics.Batch{Gauges: make(map[string]metrics.Gauge), Counters: make(map[string]metrics.Counter)}
+			for n := range names {
+				name := fmt.Sprintf("m%d", n)
+				b.Gauges[name] = metrics.Gauge(i)
+				b.Counters[name] = 1
+			}
+			assert.NoError(t, s.UpdateBatch(t.Context(), b))
+		}
+	})
+
+	for range snapshots {
+		snap := snapshot(t, s)
+		if len(snap.Gauges) == 0 {
+			continue
+		}
+		if !assert.Len(t, snap.Gauges, names) || !assert.Len(t, snap.Counters, names) {
+			break
+		}
+		want := snap.Gauges["m0"]
+		for n := range names {
+			name := fmt.Sprintf("m%d", n)
+			if snap.Gauges[name] != want || metrics.Gauge(snap.Counters[name]) != want {
+				t.Errorf("%s: gauge %v, counter %v, batch %v", name, snap.Gauges[name], snap.Counters[name], want)
+			}
+		}
+		if t.Failed() {
+			break
+		}
+	}
+	close(stop)
+	wg.Wait()
 }

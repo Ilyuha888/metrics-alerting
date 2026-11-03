@@ -217,3 +217,49 @@ func TestStorage_SaveEvery_WritesTheFile(t *testing.T) {
 		return err == nil
 	}, time.Second, 5*time.Millisecond)
 }
+
+func TestStorage_UpdateBatch_SavesOnceOnlyWithZeroInterval(t *testing.T) {
+	batch := metrics.Batch{
+		Gauges:   map[string]metrics.Gauge{"temp": 36.6, "load": 1.5},
+		Counters: map[string]metrics.Counter{"hits": 5, "errors": 1},
+	}
+	tests := []struct {
+		name      string
+		interval  time.Duration
+		wantSaves int
+		wantFile  bool
+	}{
+		{name: "zero interval writes the whole batch in one save", interval: 0, wantSaves: 1, wantFile: true},
+		{name: "positive interval leaves it to the ticker", interval: time.Hour, wantSaves: 0, wantFile: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metrics.json")
+			st := newStorage(t, path, tt.interval)
+			saves := st.CountSyncSaves()
+
+			require.NoError(t, st.UpdateBatch(t.Context(), batch))
+
+			assert.Equal(t, tt.wantSaves, *saves)
+			assert.Equal(t, metrics.Snapshot(batch), snapshot(t, st))
+			_, err := os.Stat(path)
+			assert.Equal(t, tt.wantFile, err == nil)
+			if tt.wantFile {
+				assert.Equal(t, metrics.Snapshot(batch), snapshot(t, restoreStorage(t, path, time.Hour)))
+			}
+		})
+	}
+}
+
+func TestStorage_UpdateBatch_FailedSaveReturnsErrorAndKeepsValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.json")
+	st := newStorage(t, path, 0)
+	require.NoError(t, os.Mkdir(path, 0o755))
+
+	err := st.UpdateBatch(t.Context(), metrics.Batch{Counters: map[string]metrics.Counter{"hits": 5}})
+
+	assert.ErrorContains(t, err, "rename to "+path)
+	got, err := st.Counter(t.Context(), "hits")
+	require.NoError(t, err)
+	assert.Equal(t, metrics.Counter(5), got)
+}

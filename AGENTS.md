@@ -13,7 +13,7 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `cmd/agent/` — agent entry point. Directory name is fixed by CI.
 - `internal/` — everything the two binaries share. A `main` package cannot be imported,
   so any code used by both lives here.
-- `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `ErrNotFound`.
+- `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `Batch`, `ErrNotFound`.
   Both storage and handler import it, so neither has to import the other.
 - `internal/models/` — `Metrics`, the JSON wire format the agent sends and the server reads and answers.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default;

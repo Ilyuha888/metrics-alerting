@@ -4,9 +4,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/Ilyuha888/metrics-alerting/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,4 +84,36 @@ func TestAgent_step_RecoversAfterAFailedReport(t *testing.T) {
 
 	require.Len(t, rep.sent, 2)
 	assert.EqualValues(t, 10, rep.sent[1].PollCount, "the unacknowledged polls are delivered later")
+}
+
+func pollCountOf(t *testing.T, list []models.Metrics) int64 {
+	t.Helper()
+
+	for _, m := range list {
+		if m.ID == "PollCount" {
+			require.NotNil(t, m.Delta)
+			return *m.Delta
+		}
+	}
+	require.Fail(t, "no PollCount in the batch")
+	return 0
+}
+
+func TestAgent_step_RejectedBatchKeepsThePollsUntilOneLands(t *testing.T) {
+	sender, rec := recordingServer(t, http.StatusInternalServerError)
+	a := New(NewCollector(), sender, time.Second, time.Second, discard)
+
+	a.step(1)
+	a.step(2)
+
+	require.Len(t, rec.got, 2)
+	assert.EqualValues(t, 2, pollCountOf(t, decodeBody(t, rec.got[1].body)))
+	assert.EqualValues(t, 2, a.collector.Snapshot().PollCount, "Reported must not run after a rejected batch")
+
+	rec.status = http.StatusOK
+	a.step(3)
+
+	require.Len(t, rec.got, 3)
+	assert.EqualValues(t, 3, pollCountOf(t, decodeBody(t, rec.got[2].body)))
+	assert.EqualValues(t, 0, a.collector.Snapshot().PollCount, "Reported runs once the batch landed")
 }

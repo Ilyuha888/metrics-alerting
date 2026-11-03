@@ -58,6 +58,19 @@ func (s *Storage) Counter(_ context.Context, name string) (metrics.Counter, erro
 	return v, nil
 }
 
+// UpdateBatch holds the lock for the whole batch, so a Snapshot cannot see half of it.
+func (s *Storage) UpdateBatch(_ context.Context, b metrics.Batch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for name, v := range b.Gauges {
+		s.gauges[name] = v
+	}
+	for name, v := range b.Counters {
+		s.counters[name] += v
+	}
+	return nil
+}
+
 // Snapshot copies both maps, so the caller never holds live state.
 func (s *Storage) Snapshot(_ context.Context) (metrics.Snapshot, error) {
 	s.mu.Lock()

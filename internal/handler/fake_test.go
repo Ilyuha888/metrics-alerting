@@ -17,12 +17,14 @@ type call struct {
 	count metrics.Counter
 }
 
-// fakeStorage records writes and applies them to the maps, since POST /update answers with
-// a read after the write; readErr fails every read. writeErr fails every write after applying
-// it, as filestore keeps the value in memory when its save fails. ctxErrs holds the context's
-// error at each call: once the handler returns, a deferred cancel would hide what the call saw.
+// fakeStorage records writes and applies single ones to the maps, since POST /update answers with
+// a read after the write; a batch is only recorded, since POST /updates reads nothing back. readErr
+// fails every read. writeErr fails every write after applying it, as filestore keeps the value in
+// memory when its save fails. ctxErrs holds the context's error at each call: once the handler
+// returns, a deferred cancel would hide what the call saw.
 type fakeStorage struct {
 	calls    []call
+	batches  []metrics.Batch
 	gauges   map[string]metrics.Gauge
 	counters map[string]metrics.Counter
 	readErr  error
@@ -47,6 +49,12 @@ func (f *fakeStorage) AddCounter(ctx context.Context, name string, v metrics.Cou
 		f.counters = make(map[string]metrics.Counter)
 	}
 	f.counters[name] += v
+	return f.writeErr
+}
+
+func (f *fakeStorage) UpdateBatch(ctx context.Context, b metrics.Batch) error {
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
+	f.batches = append(f.batches, b)
 	return f.writeErr
 }
 

@@ -25,6 +25,7 @@ func TestRouter_Storage_GetsRequestContext(t *testing.T) {
 		{name: "update counter from the URL", method: http.MethodPost, target: "/update/counter/hits/1", wantCalls: 1},
 		{name: "update gauge as JSON saves and loads", method: http.MethodPost, target: "/update", body: `{"id":"temp","type":"gauge","value":1.5}`, wantCalls: 2},
 		{name: "update counter as JSON saves and loads", method: http.MethodPost, target: "/update", body: `{"id":"hits","type":"counter","delta":1}`, wantCalls: 2},
+		{name: "batch as JSON", method: http.MethodPost, target: "/updates/", body: `[{"id":"temp","type":"gauge","value":1.5}]`, wantCalls: 1},
 		{name: "value of a gauge from the URL", method: http.MethodGet, target: "/value/gauge/temp", wantCalls: 1},
 		{name: "value of a counter from the URL", method: http.MethodGet, target: "/value/counter/hits", wantCalls: 1},
 		{name: "value of a gauge as JSON", method: http.MethodPost, target: "/value", body: `{"id":"temp","type":"gauge"}`, wantCalls: 1},

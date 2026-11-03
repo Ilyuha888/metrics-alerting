@@ -21,8 +21,8 @@ import (
 
 type Storage struct {
 	// Embedded so Gauge, Counter and Snapshot come from memstorage.Storage unchanged; only
-	// SetGauge and AddCounter are redefined, to save and return its error. A pointer,
-	// because a copy would carry its own mutex over the same maps.
+	// SetGauge, AddCounter and UpdateBatch are redefined, to save and return its error. A
+	// pointer, because a copy would carry its own mutex over the same maps.
 	*memstorage.Storage
 	path     string
 	interval time.Duration
@@ -30,6 +30,8 @@ type Storage struct {
 	// With -i 0 every update saves, and net/http serves requests in parallel, so two
 	// saves can overlap and rename an older snapshot over a newer one.
 	saveMu sync.Mutex
+	// A field only so a test can count saves: two saves of one batch leave the same file.
+	syncSave func() error
 }
 
 // New creates the file's parent directory, so a first start with a nested path works.
@@ -39,6 +41,7 @@ func New(mem *memstorage.Storage, path string, interval time.Duration, restore b
 		return nil, fmt.Errorf("create dir for %s: %w", path, err)
 	}
 	s := &Storage{Storage: mem, path: path, interval: interval, log: lg}
+	s.syncSave = s.Save
 	if restore {
 		if err := s.load(); err != nil {
 			return nil, fmt.Errorf("restore metrics: %w", err)
@@ -161,13 +164,21 @@ func (s *Storage) AddCounter(ctx context.Context, name string, v metrics.Counter
 	return s.saveIfSync()
 }
 
+// UpdateBatch must stay redefined: the embedded method alone would never save the file.
+func (s *Storage) UpdateBatch(ctx context.Context, b metrics.Batch) error {
+	if err := s.Storage.UpdateBatch(ctx, b); err != nil {
+		return err
+	}
+	return s.saveIfSync()
+}
+
 // saveIfSync returns a failed save without logging it, since the handler logs the error it
 // answers 500 with. The value stays in memory either way, so a client retry adds a counter twice.
 func (s *Storage) saveIfSync() error {
 	if s.interval != 0 {
 		return nil
 	}
-	return s.Save()
+	return s.syncSave()
 }
 
 // SaveEvery never returns; run it in its own goroutine.

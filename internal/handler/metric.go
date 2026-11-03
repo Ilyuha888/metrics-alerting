@@ -18,6 +18,22 @@ var (
 )
 
 func (h *handlers) save(ctx context.Context, m models.Metrics) error {
+	if err := validateUpdate(m); err != nil {
+		return err
+	}
+	switch m.MType {
+	case metrics.KindGauge:
+		return h.storage.SetGauge(ctx, m.ID, metrics.Gauge(*m.Value))
+	case metrics.KindCounter:
+		return h.storage.AddCounter(ctx, m.ID, metrics.Counter(*m.Delta))
+	default:
+		return errUnknownKind
+	}
+}
+
+// validateUpdate is what a write needs: nil means a known kind with its own value field set,
+// so a caller may dereference that field. The first failed check names the error.
+func validateUpdate(m models.Metrics) error {
 	// An empty name is a 404, as a URL with no name segment is.
 	if m.ID == "" {
 		return metrics.ErrNotFound
@@ -31,15 +47,14 @@ func (h *handlers) save(ctx context.Context, m models.Metrics) error {
 		if m.Value == nil || m.Delta != nil {
 			return errBadValue
 		}
-		return h.storage.SetGauge(ctx, m.ID, metrics.Gauge(*m.Value))
 	case metrics.KindCounter:
 		if m.Delta == nil || m.Value != nil {
 			return errBadValue
 		}
-		return h.storage.AddCounter(ctx, m.ID, metrics.Counter(*m.Delta))
 	default:
 		return errUnknownKind
 	}
+	return nil
 }
 
 func (h *handlers) load(ctx context.Context, m models.Metrics) (models.Metrics, error) {

@@ -18,6 +18,7 @@ type Storage interface {
 	Gauge(ctx context.Context, name string) (metrics.Gauge, error)
 	Counter(ctx context.Context, name string) (metrics.Counter, error)
 	Snapshot(ctx context.Context) (metrics.Snapshot, error)
+	UpdateBatch(ctx context.Context, b metrics.Batch) error
 }
 
 type Pinger interface {
@@ -41,6 +42,8 @@ func NewRouter(s Storage, db Pinger, lg *slog.Logger) http.Handler {
 
 	r.Post("/update", h.updateJSON)
 	r.Post("/update/", h.updateJSON)
+	r.Post("/updates", h.updates)
+	r.Post("/updates/", h.updates)
 	r.Post("/value", h.valueJSON)
 	r.Post("/value/", h.valueJSON)
 	r.Post("/update/{kind}/{name}/{value}", h.update)
