@@ -2,7 +2,9 @@ package agent
 
 import (
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -11,9 +13,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/Ilyuha888/metrics-alerting/internal/models"
+	"github.com/Ilyuha888/metrics-alerting/internal/retry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -208,9 +212,161 @@ func TestSender_Send_LargeErrorAnswerKeepsTheConnection(t *testing.T) {
 func TestSender_Send_UnreachableServerIsAnError(t *testing.T) {
 	sender, rec := recordingServer(t, http.StatusOK)
 	sender.endpoint = "http://127.0.0.1:1" // nothing listens here
+	sender.SetDelays([]time.Duration{time.Millisecond})
 
 	err := sender.Send(Snapshot{PollCount: 1})
 
 	require.Error(t, err)
 	assert.Empty(t, rec.got)
+}
+
+func closedPort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+	return addr
+}
+
+// countDials counts every dial the sender makes. It dials for real, so a closed port still refuses.
+func countDials(sender *Sender) *atomic.Int32 {
+	dials := new(atomic.Int32)
+	dialer := &net.Dialer{}
+	sender.client.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+	return dials
+}
+
+// serveAfter starts h on addr after d. The first dial has d to be refused, far more than a refusal
+// on loopback takes.
+func serveAfter(t *testing.T, addr string, d time.Duration, h http.Handler) {
+	t.Helper()
+	started := make(chan *httptest.Server, 1)
+	time.AfterFunc(d, func() {
+		srv := httptest.NewUnstartedServer(h)
+		srv.Listener.Close()
+		l, err := net.Listen("tcp", addr)
+		if !assert.NoError(t, err) {
+			started <- nil
+			return
+		}
+		srv.Listener = l
+		srv.Start()
+		started <- srv
+	})
+	t.Cleanup(func() {
+		if srv := <-started; srv != nil {
+			srv.Close()
+		}
+	})
+}
+
+func TestSender_Send_ServerComingUpDuringAPauseGetsTheWholeBody(t *testing.T) {
+	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
+	addr := closedPort(t)
+	sender := NewSender("http://" + addr)
+	sender.SetDelays([]time.Duration{pause})
+	dials := countDials(sender)
+	rec := &recorder{status: http.StatusOK}
+	serveAfter(t, addr, opensAfter, rec)
+
+	err := sender.Send(Snapshot{Gauges: map[string]metrics.Gauge{"a": 1.5, "b": 2.5}, PollCount: 3})
+
+	require.NoError(t, err)
+	assert.EqualValues(t, 2, dials.Load())
+	require.Len(t, rec.got, 1)
+	assert.Equal(t, "gzip", rec.got[0].contentEncoding)
+	assert.ElementsMatch(t, []models.Metrics{
+		{ID: "a", MType: metrics.KindGauge, Value: float(1.5)},
+		{ID: "b", MType: metrics.KindGauge, Value: float(2.5)},
+		{ID: "PollCount", MType: metrics.KindCounter, Delta: integer(3)},
+	}, decodeBody(t, rec.got[0].body))
+}
+
+func TestSender_Send_ClosedPortDialsFourTimes(t *testing.T) {
+	sender := NewSender("http://" + closedPort(t))
+	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
+	dials := countDials(sender)
+
+	err := sender.Send(Snapshot{PollCount: 1})
+
+	var opErr *net.OpError
+	require.ErrorAs(t, err, &opErr)
+	assert.Equal(t, "dial", opErr.Op)
+	assert.ErrorContains(t, err, "after 4 attempts")
+	assert.EqualValues(t, 4, dials.Load())
+}
+
+func TestNewSender_RepeatsWithTheDefaultDelays(t *testing.T) {
+	assert.Equal(t, retry.DefaultDelays, NewSender("http://localhost").delays)
+}
+
+func TestSender_Send_FailureAfterTheRequestWentOutIsNotRepeated(t *testing.T) {
+	tests := []struct {
+		name      string
+		handler   func(w http.ResponseWriter, r *http.Request)
+		timeout   time.Duration
+		wantOpErr bool
+	}{
+		{
+			name: "server closes the connection before answering",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if assert.NoError(t, err) {
+					conn.Close()
+				}
+			},
+		},
+		{
+			name: "server resets the connection before answering",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if assert.NoError(t, err) {
+					assert.NoError(t, conn.(*net.TCPConn).SetLinger(0))
+					conn.Close()
+				}
+			},
+			wantOpErr: true,
+		},
+		{
+			name: "no answer within the client's timeout",
+			handler: func(_ http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				<-r.Context().Done()
+			},
+			timeout: 100 * time.Millisecond,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				tt.handler(w, r)
+			}))
+			defer srv.Close()
+			sender := NewSender(srv.URL)
+			sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
+			if tt.timeout > 0 {
+				sender.client.Timeout = tt.timeout
+			}
+
+			err := sender.Send(Snapshot{PollCount: 1})
+
+			require.Error(t, err)
+			var opErr *net.OpError
+			isOpErr := errors.As(err, &opErr)
+			assert.False(t, isOpErr && opErr.Op == "dial", "%v", err)
+			if tt.wantOpErr {
+				assert.True(t, isOpErr, "%v", err)
+			}
+			assert.EqualValues(t, 1, requests.Load())
+		})
+	}
 }

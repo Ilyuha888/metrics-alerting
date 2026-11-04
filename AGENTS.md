@@ -19,11 +19,12 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default;
   `Seconds`, the bare-seconds interval flag type.
 - `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-l` flag.
+- `internal/retry/` — `Do`, which repeats an operation on a retriable error, and `DefaultDelays`.
 - `internal/storage/memstorage/` — `Storage`, the in-memory `handler.Storage`.
 - `internal/storage/filestore/` — `Storage`, which wraps `memstorage.Storage` and saves it to a JSON file
   periodically or on every update, and restores it at start.
 - `internal/storage/database/` — `Open`, which returns a pinged `*sql.DB` with the embedded goose
-  migrations from `migrations/` applied.
+  migrations from `migrations/` applied; `IsRetriable` and `IsConnectionLost`, which classify PostgreSQL errors for `retry.Do`.
 - `internal/storage/pgstore/` — `Storage`, the `handler.Storage` on PostgreSQL, over the pool from `database`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
   interfaces it needs, and passes the request's context to both.
@@ -104,6 +105,25 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 - Handle every edge and negative case the increment describes; the autotests tighten each
   sprint.
 
+## Retries
+
+Temporary errors get three more attempts, after pauses of 1, 3 and 5 seconds. A counter update sums,
+so a second run of an update that landed would count twice, and which failures repeat depends on the method.
+
+- `database.IsRetriable`: the connection never came up (57P03, a `*pgconn.ConnectError` without a server
+  code) or the server reports a connection exception (class 08). 08007 is excluded, since the commit's
+  result is unknown. Not 40P01, 53300 or a context error during a statement.
+- `database.IsConnectionLost`: 57P01 or `driver: bad connection`, a connection that was up and went away.
+  It repeats only where a repeat cannot add a counter twice.
+- `pgstore` by method: `SetGauge`, `Gauge`, `Counter` and `Snapshot` repeat on both. `AddCounter` repeats
+  on `IsRetriable` only. `UpdateBatch` repeats on `IsRetriable`, and on a lost connection only if `BeginTx`
+  failed.
+- `pgstore` attempts: each has its own `queryTimeout`; a pause waits on the caller's context. `UpdateBatch`
+  and `Snapshot` repeat the whole transaction from `BeginTx`.
+- `database.Open`: the ping repeats inside the caller's context. Migrations do not repeat.
+- `GET /ping` does not repeat: it reports the state now.
+- Agent, `Sender`: only a `*net.OpError` with `Op` `dial`. Not EOF, a timeout or a non-200 answer.
+
 ## Known debt
 
 - The server does not save on SIGINT or SIGTERM, so metrics newer than the last save are
@@ -113,6 +133,8 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
   down, so intervals that do not divide evenly report early: `-p 3 -r 10` reports every
   9 seconds. Exact timing needs a separate reporting timer, which waits for the sprint on
   goroutines.
+- The agent does not poll during the pauses between send attempts, up to 9 seconds, because one
+  goroutine does both jobs. Polling through them waits for the sprint on goroutines.
 
 ## Updating the template
 

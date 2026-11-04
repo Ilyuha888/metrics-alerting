@@ -3,15 +3,19 @@ package agent
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/Ilyuha888/metrics-alerting/internal/models"
+	"github.com/Ilyuha888/metrics-alerting/internal/retry"
 )
 
 const sendTimeout = 5 * time.Second
@@ -19,12 +23,14 @@ const sendTimeout = 5 * time.Second
 type Sender struct {
 	endpoint string
 	client   *http.Client
+	delays   []time.Duration
 }
 
 func NewSender(endpoint string) *Sender {
 	return &Sender{
 		endpoint: strings.TrimSuffix(endpoint, "/"),
 		client:   &http.Client{Timeout: sendTimeout},
+		delays:   retry.DefaultDelays,
 	}
 }
 
@@ -51,9 +57,24 @@ func (s *Sender) post(list []models.Metrics) error {
 	if err != nil {
 		return err
 	}
+	body := buf.Bytes()
 
+	return retry.Do(context.Background(), s.delays, isDialFailure, func() error {
+		return s.postOnce(body)
+	})
+}
+
+// isDialFailure accepts only a connection that never came up. After EOF, a timeout or a 5xx the
+// request may have landed, and a repeat would count PollCount twice.
+func isDialFailure(err error) bool {
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr.Op == "dial"
+}
+
+func (s *Sender) postOnce(body []byte) error {
 	url := fmt.Sprintf("%s/updates/", s.endpoint)
-	req, err := http.NewRequest(http.MethodPost, url, buf)
+	// A reader per attempt: one that an earlier attempt read would send nothing on a repeat.
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request %s: %w", url, err)
 	}

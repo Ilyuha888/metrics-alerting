@@ -117,3 +117,15 @@ func TestAgent_step_RejectedBatchKeepsThePollsUntilOneLands(t *testing.T) {
 	assert.EqualValues(t, 3, pollCountOf(t, decodeBody(t, rec.got[2].body)))
 	assert.EqualValues(t, 0, a.collector.Snapshot().PollCount, "Reported runs once the batch landed")
 }
+
+func TestAgent_step_UnreachableServerKeepsThePollsAfterEveryDial(t *testing.T) {
+	sender := NewSender("http://" + closedPort(t))
+	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
+	dials := countDials(sender)
+	a := New(NewCollector(), sender, time.Second, time.Second, discard)
+
+	a.step(1)
+
+	assert.EqualValues(t, 4, dials.Load())
+	assert.EqualValues(t, 1, a.collector.Snapshot().PollCount, "Reported must not run after the last dial failed")
+}

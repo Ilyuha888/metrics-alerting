@@ -21,10 +21,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newDatabase creates a throwaway database, so tests never add tables to the one
+// newDatabaseDSN creates a throwaway database, so tests never add tables to the one
 // TEST_DATABASE_DSN names and always start with no rows. The DSN must be in URL form: its
 // path is replaced. The admin pool is a plain sql.Open, since database.Open would migrate it.
-func newDatabase(t *testing.T) *sql.DB {
+func newDatabaseDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_DSN")
 	if dsn == "" {
@@ -46,10 +46,20 @@ func newDatabase(t *testing.T) *sql.DB {
 	})
 
 	target.Path = name
-	db, err := database.Open(context.Background(), target.String())
+	return target.String()
+}
+
+func newDatabaseAt(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	db, err := database.Open(context.Background(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, db.Close()) })
 	return db
+}
+
+func newDatabase(t *testing.T) *sql.DB {
+	t.Helper()
+	return newDatabaseAt(t, newDatabaseDSN(t))
 }
 
 func TestStorage_SetGauge_LastReportWins(t *testing.T) {
