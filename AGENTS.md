@@ -28,7 +28,7 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/storage/pgstore/` — `Storage`, the `handler.Storage` on PostgreSQL, over the pool from `database`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
   interfaces it needs, and passes the request's context to both.
-- `internal/agent/` — collector, sender and the polling loop.
+- `internal/agent/` — collector, sender and the polling loop, which runs until its context is done.
 
 Do not create a directory before something goes in it. Git does not track empty
 directories, and an empty package is noise.
@@ -80,6 +80,8 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 
 - One branch per increment, named `iterN`. Branch increment N+1 off increment N, not off
   `main`.
+- `iter131` is outside the increment numbering: the increment autotests do not run on it in CI,
+  as the workflow's step conditions list branches by name.
 - One pull request per increment, added to the sprint's GitHub stack, so the reviewer reviews the sprint at its top PR and the stack merges in one action. Do not merge it; `main` receives an increment only after a reviewer accepts it.
 - The first PR of a sprint targets `main`; each next `iterN` PR targets `iter(N-1)`.
 - The repo owner merges, with a merge commit, never squash; fix a pushed lower branch with new
@@ -123,6 +125,18 @@ so a second run of an update that landed would count twice, and which failures r
 - `database.Open`: the ping repeats inside the caller's context. Migrations do not repeat.
 - `GET /ping` does not repeat: it reports the state now.
 - Agent, `Sender`: only a `*net.OpError` with `Op` `dial`. Not EOF, a timeout or a non-200 answer.
+
+## Stopping the agent
+
+SIGINT or SIGTERM cancels the context `Run` got from `main`. The signal interrupts pauses only: a request
+in flight waits for its answer, up to the client's 5 s timeout, since a cut request may have landed and a
+repeat would count `PollCount` twice.
+
+- Signal outside a send, or during a send that succeeded: one last report goes out, without `Reported`, on
+  its own context of 5 s. That context stops only its pauses, so a request started at 4 s can hold it to 9 s.
+- Signal during a send that ends in an error: no last report, and the polls since the last report are lost.
+- A pause the signal cut is not logged as a `send metrics` error. A real failure is.
+- Then `agent stopped` at Info, `Run` returns, the process exits 0.
 
 ## Known debt
 

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/agent"
 	"github.com/Ilyuha888/metrics-alerting/internal/logger"
@@ -35,6 +38,8 @@ func run() error {
 
 	c := agent.NewCollector()
 	s := agent.NewSender(serverEndpoint)
-	agent.New(c, s, pollInterval, reportInterval, lg).Run()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	agent.New(c, s, pollInterval, reportInterval, lg).Run(ctx)
 	return nil
 }

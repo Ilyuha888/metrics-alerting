@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestSender_Send_BuildsOneRequestWithTheWholeSnapshot(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sender, rec := recordingServer(t, http.StatusOK)
 
-			require.NoError(t, sender.Send(tt.snap))
+			require.NoError(t, sender.Send(t.Context(), tt.snap))
 
 			require.Len(t, rec.got, 1)
 			assert.Equal(t, "/updates/", rec.got[0].path)
@@ -137,7 +138,7 @@ func TestSender_Send_AlwaysReportsPollCount(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sender, rec := recordingServer(t, http.StatusOK)
 
-			require.NoError(t, sender.Send(tt.snap))
+			require.NoError(t, sender.Send(t.Context(), tt.snap))
 
 			require.Len(t, rec.got, 1)
 			assert.ElementsMatch(t, tt.want, decodeBody(t, rec.got[0].body))
@@ -157,7 +158,7 @@ func TestSender_Send_EmptySnapshotSendsNoRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sender, rec := recordingServer(t, http.StatusOK)
 
-			require.NoError(t, sender.Send(tt.snap))
+			require.NoError(t, sender.Send(t.Context(), tt.snap))
 
 			assert.Empty(t, rec.got)
 		})
@@ -178,7 +179,7 @@ func TestSender_Send_Non200IsAnErrorAfterOneRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sender, rec := recordingServer(t, tt.status)
 
-			err := sender.Send(Snapshot{Gauges: map[string]metrics.Gauge{"a": 1, "b": 2}, PollCount: 1})
+			err := sender.Send(t.Context(), Snapshot{Gauges: map[string]metrics.Gauge{"a": 1, "b": 2}, PollCount: 1})
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), strconv.Itoa(tt.status))
@@ -203,8 +204,8 @@ func TestSender_Send_LargeErrorAnswerKeepsTheConnection(t *testing.T) {
 	t.Cleanup(srv.Close)
 	sender := NewSender(srv.URL)
 
-	require.Error(t, sender.Send(Snapshot{PollCount: 1}))
-	require.Error(t, sender.Send(Snapshot{PollCount: 1}))
+	require.Error(t, sender.Send(t.Context(), Snapshot{PollCount: 1}))
+	require.Error(t, sender.Send(t.Context(), Snapshot{PollCount: 1}))
 
 	assert.EqualValues(t, 1, connections.Load())
 }
@@ -214,7 +215,7 @@ func TestSender_Send_UnreachableServerIsAnError(t *testing.T) {
 	sender.endpoint = "http://127.0.0.1:1" // nothing listens here
 	sender.SetDelays([]time.Duration{time.Millisecond})
 
-	err := sender.Send(Snapshot{PollCount: 1})
+	err := sender.Send(t.Context(), Snapshot{PollCount: 1})
 
 	require.Error(t, err)
 	assert.Empty(t, rec.got)
@@ -275,7 +276,7 @@ func TestSender_Send_ServerComingUpDuringAPauseGetsTheWholeBody(t *testing.T) {
 	rec := &recorder{status: http.StatusOK}
 	serveAfter(t, addr, opensAfter, rec)
 
-	err := sender.Send(Snapshot{Gauges: map[string]metrics.Gauge{"a": 1.5, "b": 2.5}, PollCount: 3})
+	err := sender.Send(t.Context(), Snapshot{Gauges: map[string]metrics.Gauge{"a": 1.5, "b": 2.5}, PollCount: 3})
 
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, dials.Load())
@@ -293,7 +294,7 @@ func TestSender_Send_ClosedPortDialsFourTimes(t *testing.T) {
 	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
 	dials := countDials(sender)
 
-	err := sender.Send(Snapshot{PollCount: 1})
+	err := sender.Send(t.Context(), Snapshot{PollCount: 1})
 
 	var opErr *net.OpError
 	require.ErrorAs(t, err, &opErr)
@@ -357,7 +358,7 @@ func TestSender_Send_FailureAfterTheRequestWentOutIsNotRepeated(t *testing.T) {
 				sender.client.Timeout = tt.timeout
 			}
 
-			err := sender.Send(Snapshot{PollCount: 1})
+			err := sender.Send(t.Context(), Snapshot{PollCount: 1})
 
 			require.Error(t, err)
 			var opErr *net.OpError
@@ -369,4 +370,63 @@ func TestSender_Send_FailureAfterTheRequestWentOutIsNotRepeated(t *testing.T) {
 			assert.EqualValues(t, 1, requests.Load())
 		})
 	}
+}
+
+func TestSender_Send_CancelDuringAPauseReturnsAtOnce(t *testing.T) {
+	sender := NewSender("http://" + closedPort(t))
+	sender.SetDelays([]time.Duration{time.Hour, time.Hour})
+	dials := countDials(sender)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+
+	go func() { result <- sender.Send(ctx, Snapshot{PollCount: 1}) }()
+	require.Eventually(t, func() bool { return dials.Load() == 1 }, 2*time.Second, time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-result:
+		assert.ErrorIs(t, err, context.Canceled)
+		var opErr *net.OpError
+		require.ErrorAs(t, err, &opErr)
+		assert.Equal(t, "dial", opErr.Op)
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "Send did not return on the cancel")
+	}
+	assert.EqualValues(t, 1, dials.Load())
+}
+
+func TestSender_Send_CancelWhileTheServerHoldsItsAnswerWaitsForIt(t *testing.T) {
+	const longerThanACutTakes = 200 * time.Millisecond
+	var requests atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		io.Copy(io.Discard, r.Body)
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+	sender := NewSender(srv.URL)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+
+	go func() { result <- sender.Send(ctx, Snapshot{PollCount: 1}) }()
+	<-entered
+	cancel()
+
+	select {
+	case err := <-result:
+		require.Fail(t, "Send returned before the answer", "%v", err)
+	case <-time.After(longerThanACutTakes):
+	}
+	releaseOnce()
+
+	assert.NoError(t, <-result)
+	assert.EqualValues(t, 1, requests.Load())
 }

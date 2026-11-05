@@ -35,8 +35,9 @@ func NewSender(endpoint string) *Sender {
 }
 
 // Send makes one request, so a report lands whole or not at all. A snapshot with nothing in it
-// sends nothing; any other includes PollCount, even at 0.
-func (s *Sender) Send(snap Snapshot) error {
+// sends nothing; any other includes PollCount, even at 0. ctx interrupts only the pauses between
+// attempts.
+func (s *Sender) Send(ctx context.Context, snap Snapshot) error {
 	if len(snap.Gauges) == 0 && snap.PollCount == 0 {
 		return nil
 	}
@@ -49,17 +50,17 @@ func (s *Sender) Send(snap Snapshot) error {
 	delta := int64(snap.PollCount)
 	list = append(list, models.Metrics{ID: "PollCount", MType: metrics.KindCounter, Delta: &delta})
 
-	return s.post(list)
+	return s.post(ctx, list)
 }
 
-func (s *Sender) post(list []models.Metrics) error {
+func (s *Sender) post(ctx context.Context, list []models.Metrics) error {
 	buf, err := gzipJSON(list)
 	if err != nil {
 		return err
 	}
 	body := buf.Bytes()
 
-	return retry.Do(context.Background(), s.delays, isDialFailure, func() error {
+	return retry.Do(ctx, s.delays, isDialFailure, func() error {
 		return s.postOnce(body)
 	})
 }
@@ -74,6 +75,7 @@ func isDialFailure(err error) bool {
 func (s *Sender) postOnce(body []byte) error {
 	url := fmt.Sprintf("%s/updates/", s.endpoint)
 	// A reader per attempt: one that an earlier attempt read would send nothing on a repeat.
+	// No context: a cut request may still have landed, and sending it again would count PollCount twice.
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("build request %s: %w", url, err)
