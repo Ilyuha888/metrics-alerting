@@ -37,7 +37,11 @@ type indexPage struct {
 }
 
 func (h *handlers) index(w http.ResponseWriter, r *http.Request) {
-	snap := h.storage.Snapshot()
+	snap, err := h.storage.Snapshot(r.Context())
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
 
 	page := indexPage{
 		Gauges:   make([]row, 0, len(snap.Gauges)),

@@ -13,17 +13,22 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `cmd/agent/` — agent entry point. Directory name is fixed by CI.
 - `internal/` — everything the two binaries share. A `main` package cannot be imported,
   so any code used by both lives here.
-- `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `ErrNotFound`.
+- `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `Batch`, `ErrNotFound`.
   Both storage and handler import it, so neither has to import the other.
 - `internal/models/` — `Metrics`, the JSON wire format the agent sends and the server reads and answers.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default;
   `Seconds`, the bare-seconds interval flag type.
 - `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-l` flag.
-- `internal/storage/` — `MemStorage`.
-- `internal/filestore/` — `Storage`, which wraps `MemStorage` and saves it to a JSON file
+- `internal/retry/` — `Do`, which repeats an operation on a retriable error, and `DefaultDelays`.
+- `internal/storage/memstorage/` — `Storage`, the in-memory `handler.Storage`.
+- `internal/storage/filestore/` — `Storage`, which wraps `memstorage.Storage` and saves it to a JSON file
   periodically or on every update, and restores it at start.
-- `internal/handler/` — the HTTP layer on chi. It declares the `Storage` interface it needs.
-- `internal/agent/` — collector, sender and the polling loop.
+- `internal/storage/database/` — `Open`, which returns a pinged `*sql.DB` with the embedded goose
+  migrations from `migrations/` applied; `IsRetriable` and `IsConnectionLost`, which classify PostgreSQL errors for `retry.Do`.
+- `internal/storage/pgstore/` — `Storage`, the `handler.Storage` on PostgreSQL, over the pool from `database`.
+- `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
+  interfaces it needs, and passes the request's context to both.
+- `internal/agent/` — collector, sender and the polling loop, which runs until its context is done.
 
 Do not create a directory before something goes in it. Git does not track empty
 directories, and an empty package is noise.
@@ -35,6 +40,13 @@ go build ./cmd/...        # build both binaries
 go test ./...             # tests
 go vet ./...              # what CI runs, minus the Practicum vettool
 gofmt -l -w .             # format
+```
+
+Tests in `internal/storage/database` and `internal/storage/pgstore` need a real PostgreSQL. They read a URL-form
+DSN from `TEST_DATABASE_DSN`, create and drop their own databases, and skip without it:
+
+```sh
+TEST_DATABASE_DSN='postgres://postgres:postgres@localhost:5432/praktikum?sslmode=disable' go test ./...
 ```
 
 CI builds each binary from inside its own directory, so the artifacts are
@@ -68,10 +80,10 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 
 - One branch per increment, named `iterN`. Branch increment N+1 off increment N, not off
   `main`.
-- One pull request per increment. Do not merge it; `main` receives an increment only after
-  a reviewer accepts it.
-- Each `iterN` PR targets `iter(N-1)`; before a sprint's review, retarget its last PR to
-  `main`.
+- `iter131` is outside the increment numbering: the increment autotests do not run on it in CI,
+  as the workflow's step conditions list branches by name.
+- One pull request per increment, added to the sprint's GitHub stack, so the reviewer reviews the sprint at its top PR and the stack merges in one action. Do not merge it; `main` receives an increment only after a reviewer accepts it.
+- The first PR of a sprint targets `main`; each next `iterN` PR targets `iter(N-1)`.
 - The repo owner merges, with a merge commit, never squash; fix a pushed lower branch with new
   commits only.
 - Commit subject only, English, imperative. Add a body when the "Why" is not visible in the
@@ -79,7 +91,7 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 
 ## Conventions
 
-- Standard library only. Add a dependency in the sprint that introduces it, not earlier.
+- Prefer the standard library. Add a dependency in the sprint that introduces it, not earlier.
 - Keep `main` thin: parse flags, build dependencies, call `run() error`. `os.Exit` skips
   deferred calls, so it belongs in `main` and nowhere deeper.
 - Errors are returned, not panicked, and wrapped with `fmt.Errorf("...: %w", err)`.
@@ -95,6 +107,37 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
 - Handle every edge and negative case the increment describes; the autotests tighten each
   sprint.
 
+## Retries
+
+Temporary errors get three more attempts, after pauses of 1, 3 and 5 seconds. A counter update sums,
+so a second run of an update that landed would count twice, and which failures repeat depends on the method.
+
+- `database.IsRetriable`: the connection never came up (57P03, a `*pgconn.ConnectError` without a server
+  code) or the server reports a connection exception (class 08). 08007 is excluded, since the commit's
+  result is unknown. Not 40P01, 53300 or a context error during a statement.
+- `database.IsConnectionLost`: 57P01 or `driver: bad connection`, a connection that was up and went away.
+  It repeats only where a repeat cannot add a counter twice.
+- `pgstore` by method: `SetGauge`, `Gauge`, `Counter` and `Snapshot` repeat on both. `AddCounter` repeats
+  on `IsRetriable` only. `UpdateBatch` repeats on `IsRetriable`, and on a lost connection only if `BeginTx`
+  failed.
+- `pgstore` attempts: each has its own `queryTimeout`; a pause waits on the caller's context. `UpdateBatch`
+  and `Snapshot` repeat the whole transaction from `BeginTx`.
+- `database.Open`: the ping repeats inside the caller's context. Migrations do not repeat.
+- `GET /ping` does not repeat: it reports the state now.
+- Agent, `Sender`: only a `*net.OpError` with `Op` `dial`. Not EOF, a timeout or a non-200 answer.
+
+## Stopping the agent
+
+SIGINT or SIGTERM cancels the context `Run` got from `main`. The signal interrupts pauses only: a request
+in flight waits for its answer, up to the client's 5 s timeout, since a cut request may have landed and a
+repeat would count `PollCount` twice.
+
+- Signal outside a send, or during a send that succeeded: one last report goes out, without `Reported`, on
+  its own context of 5 s. That context stops only its pauses, so a request started at 4 s can hold it to 9 s.
+- Signal during a send that ends in an error: no last report, and the polls since the last report are lost.
+- A pause the signal cut is not logged as a `send metrics` error. A real failure is.
+- Then `agent stopped` at Info, `Run` returns, the process exits 0.
+
 ## Known debt
 
 - The server does not save on SIGINT or SIGTERM, so metrics newer than the last save are
@@ -104,6 +147,8 @@ Autotest sources: https://github.com/Yandex-Practicum/go-autotests
   down, so intervals that do not divide evenly report early: `-p 3 -r 10` reports every
   9 seconds. Exact timing needs a separate reporting timer, which waits for the sprint on
   goroutines.
+- The agent does not poll during the pauses between send attempts, up to 9 seconds, because one
+  goroutine does both jobs. Polling through them waits for the sprint on goroutines.
 
 ## Updating the template
 

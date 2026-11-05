@@ -20,3 +20,9 @@ type Snapshot struct {
 	Gauges   map[string]Gauge
 	Counters map[string]Counter
 }
+
+// Batch is one report: a gauge name appears once, a counter holds the sum of its deltas.
+type Batch struct {
+	Gauges   map[string]Gauge
+	Counters map[string]Counter
+}

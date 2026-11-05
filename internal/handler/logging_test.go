@@ -146,7 +146,7 @@ func TestRouter_Logging_LogsEveryRejectionWithItsStatus(t *testing.T) {
 			var buf bytes.Buffer
 			lg := slog.New(slog.NewJSONHandler(&buf, nil))
 			fake := &fakeStorage{}
-			router := handler.NewRouter(fake, lg)
+			router := handler.NewRouter(fake, nil, lg)
 			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader("payload"))
 			if tt.contentEncoding != "" {
 				req.Header.Set("Content-Encoding", tt.contentEncoding)

@@ -1,6 +1,9 @@
 package handler_test
 
 import (
+	"bytes"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +17,7 @@ import (
 
 func getIndex(t *testing.T, s *fakeStorage) string {
 	t.Helper()
-	router := handler.NewRouter(s, discardLogger)
+	router := handler.NewRouter(s, nil, discardLogger)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 
@@ -52,4 +55,19 @@ func TestRouter_Index_EmptyStorage(t *testing.T) {
 	body := getIndex(t, &fakeStorage{})
 
 	assert.Equal(t, 2, strings.Count(body, "<li>none</li>"))
+}
+
+func TestRouter_Index_StorageFailureIs500WithoutCause(t *testing.T) {
+	const cause = "dial postgres://user:secret@host failed"
+	var logs bytes.Buffer
+	router := handler.NewRouter(&fakeStorage{readErr: errors.New(cause)}, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.NotContains(t, w.Body.String(), "secret")
+	assert.NotContains(t, w.Body.String(), "<html>", "the page is not started before the failure")
+	assert.Contains(t, logs.String(), cause)
 }

@@ -246,7 +246,7 @@ func TestWithGzip_ServeHTTP_AcceptsOnlyGzipAndIdentityBodies(t *testing.T) {
 func TestRouter_Gzip_LogShowsCompressedSize(t *testing.T) {
 	var buf bytes.Buffer
 	lg := slog.New(slog.NewJSONHandler(&buf, nil))
-	router := handler.NewRouter(&fakeStorage{gauges: map[string]metrics.Gauge{"temp": 36.6}}, lg)
+	router := handler.NewRouter(&fakeStorage{gauges: map[string]metrics.Gauge{"temp": 36.6}}, nil, lg)
 	req := httptest.NewRequest(http.MethodPost, "/value", strings.NewReader(`{"id":"temp","type":"gauge"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Encoding", "gzip")
@@ -290,7 +290,7 @@ func TestRouter_Gzip_RejectionIsLogged(t *testing.T) {
 			var buf bytes.Buffer
 			lg := slog.New(slog.NewJSONHandler(&buf, nil))
 			fake := &fakeStorage{}
-			router := handler.NewRouter(fake, lg)
+			router := handler.NewRouter(fake, nil, lg)
 			req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader("payload"))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Content-Encoding", tt.contentEncoding)
@@ -344,7 +344,7 @@ func TestRouter_Gzip_CompressesJSONButNotPlainText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := handler.NewRouter(&fakeStorage{gauges: map[string]metrics.Gauge{"temp": 36.6}}, discardLogger)
+			router := handler.NewRouter(&fakeStorage{gauges: map[string]metrics.Gauge{"temp": 36.6}}, nil, discardLogger)
 			req := httptest.NewRequest(tt.method, tt.target, bytes.NewReader(tt.body))
 			if tt.body != nil {
 				req.Header.Set("Content-Type", "application/json")

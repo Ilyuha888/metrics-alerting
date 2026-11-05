@@ -36,7 +36,7 @@ func (h *handlers) update(w http.ResponseWriter, r *http.Request) {
 		m.Delta = &v
 	}
 
-	if err := h.save(m); err != nil {
+	if err := h.save(r.Context(), m); err != nil {
 		h.writeError(w, err)
 		return
 	}
