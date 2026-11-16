@@ -16,7 +16,7 @@ func TestParseParams(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
-		// A variable missing from env is unset for the case, so the developer's own ADDRESS, REPORT_INTERVAL and POLL_INTERVAL cannot leak in.
+		// A variable missing from env is unset for the case, so the developer's own ADDRESS, REPORT_INTERVAL, POLL_INTERVAL and KEY cannot leak in.
 		env     map[string]string
 		want    params
 		wantErr string
@@ -107,10 +107,36 @@ func TestParseParams(t *testing.T) {
 			env:     map[string]string{"REPORT_INTERVAL": "10s"},
 			wantErr: `REPORT_INTERVAL: strconv.Atoi: parsing "10s"`,
 		},
+		{
+			name: "key is empty by default",
+			want: params{address: config.DefaultAddress(), reportInterval: 10 * time.Second, pollInterval: 2 * time.Second, key: ""},
+		},
+		{
+			name: "key flag",
+			args: []string{"-k", "flag-key"},
+			want: params{address: config.DefaultAddress(), reportInterval: 10 * time.Second, pollInterval: 2 * time.Second, key: "flag-key"},
+		},
+		{
+			name: "env key beats default",
+			env:  map[string]string{"KEY": "env-key"},
+			want: params{address: config.DefaultAddress(), reportInterval: 10 * time.Second, pollInterval: 2 * time.Second, key: "env-key"},
+		},
+		{
+			name: "env key beats flag",
+			args: []string{"-k", "flag-key"},
+			env:  map[string]string{"KEY": "env-key"},
+			want: params{address: config.DefaultAddress(), reportInterval: 10 * time.Second, pollInterval: 2 * time.Second, key: "env-key"},
+		},
+		{
+			name: "empty env key behaves as unset",
+			args: []string{"-k", "flag-key"},
+			env:  map[string]string{"KEY": ""},
+			want: params{address: config.DefaultAddress(), reportInterval: 10 * time.Second, pollInterval: 2 * time.Second, key: "flag-key"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, k := range []string{"ADDRESS", "REPORT_INTERVAL", "POLL_INTERVAL"} {
+			for _, k := range []string{"ADDRESS", "REPORT_INTERVAL", "POLL_INTERVAL", "KEY"} {
 				v, ok := tt.env[k]
 				// Setenv first so the test restores the developer's value; then unset if the case omits it.
 				t.Setenv(k, v)

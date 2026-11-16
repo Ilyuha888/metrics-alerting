@@ -35,7 +35,7 @@ func TestRouter_BadName_Is400AndStorageIsNotCalled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeStorage{}
-			router := handler.NewRouter(fake, nil, discardLogger)
+			router := handler.NewRouter(fake, nil, discardLogger, nil)
 			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
@@ -64,7 +64,7 @@ func TestRouter_UnusualValidName_ReachesStorage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeStorage{counters: map[string]metrics.Counter{"aÿb": 1, "a�b": 1, "a\x01b": 1}}
-			router := handler.NewRouter(fake, nil, discardLogger)
+			router := handler.NewRouter(fake, nil, discardLogger, nil)
 			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()

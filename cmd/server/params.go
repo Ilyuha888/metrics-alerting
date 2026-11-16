@@ -18,6 +18,7 @@ type params struct {
 	filePath      string
 	restore       bool
 	databaseDSN   string
+	key           string
 }
 
 // Strings, so an env value goes through the same Set as the flag.
@@ -27,6 +28,7 @@ type envParams struct {
 	FileStoragePath string `env:"FILE_STORAGE_PATH"`
 	Restore         string `env:"RESTORE"`
 	DatabaseDSN     string `env:"DATABASE_DSN"`
+	Key             string `env:"KEY"`
 }
 
 func parseParams(args []string) (params, error) {
@@ -43,6 +45,7 @@ func parseParams(args []string) (params, error) {
 	// A bool flag takes its value only as -r=false; "-r false" ends flag parsing.
 	fs.BoolVar(&p.restore, "r", true, "Restore metrics from the file at start")
 	fs.StringVar(&p.databaseDSN, "d", "", "PostgreSQL connection string")
+	fs.StringVar(&p.key, "k", "", "Key to check request and sign answer bodies; empty turns signatures off")
 	if err := fs.Parse(args); err != nil {
 		return p, err
 	}
@@ -76,6 +79,9 @@ func parseParams(args []string) (params, error) {
 	}
 	if e.DatabaseDSN != "" {
 		p.databaseDSN = e.DatabaseDSN
+	}
+	if e.Key != "" {
+		p.key = e.Key
 	}
 
 	return p, nil

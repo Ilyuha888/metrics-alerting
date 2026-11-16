@@ -17,7 +17,7 @@ import (
 
 func getIndex(t *testing.T, s *fakeStorage) string {
 	t.Helper()
-	router := handler.NewRouter(s, nil, discardLogger)
+	router := handler.NewRouter(s, nil, discardLogger, nil)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 
@@ -60,7 +60,7 @@ func TestRouter_Index_EmptyStorage(t *testing.T) {
 func TestRouter_Index_StorageFailureIs500WithoutCause(t *testing.T) {
 	const cause = "dial postgres://user:secret@host failed"
 	var logs bytes.Buffer
-	router := handler.NewRouter(&fakeStorage{readErr: errors.New(cause)}, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	router := handler.NewRouter(&fakeStorage{readErr: errors.New(cause)}, nil, slog.New(slog.NewTextHandler(&logs, nil)), nil)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 

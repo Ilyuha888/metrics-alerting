@@ -37,7 +37,7 @@ func run() error {
 	lg.Info("agent started", "server", serverEndpoint, "poll", pollInterval, "report", reportInterval)
 
 	c := agent.NewCollector()
-	s := agent.NewSender(serverEndpoint)
+	s := agent.NewSender(serverEndpoint, []byte(p.key))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	agent.New(c, s, pollInterval, reportInterval, lg).Run(ctx)

@@ -26,7 +26,7 @@ const (
 func postGzipBatch(t *testing.T, s *fakeStorage, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	router := handler.NewRouter(s, nil, discardLogger)
+	router := handler.NewRouter(s, nil, discardLogger, nil)
 	req := httptest.NewRequest(http.MethodPost, "/updates/", bytes.NewReader(gzipString(t, body)))
 	req.Header.Set("Content-Type", jsonType)
 	req.Header.Set("Content-Encoding", "gzip")
@@ -123,7 +123,7 @@ func TestRouter_Updates_GoodListStoresOneMergedBatch(t *testing.T) {
 
 func TestRouter_Updates_GzipBodyIsStoredAndTheAnswerStaysEmpty(t *testing.T) {
 	s := &fakeStorage{}
-	router := handler.NewRouter(s, nil, discardLogger)
+	router := handler.NewRouter(s, nil, discardLogger, nil)
 	req := httptest.NewRequest(http.MethodPost, "/updates/", bytes.NewReader(gzipString(t, fmt.Sprintf("[%s,%s]", goodElement, otherElement))))
 	req.Header.Set("Content-Type", jsonType)
 	req.Header.Set("Content-Encoding", "gzip")
@@ -248,7 +248,7 @@ func TestRouter_Updates_BadElementInAnyPositionAnswersAsUpdateAndStoresNothing(t
 func TestRouter_Updates_StorageFailureIs500WithoutCause(t *testing.T) {
 	var logs bytes.Buffer
 	s := &fakeStorage{writeErr: errors.New("connection to 10.0.0.1 lost")}
-	router := handler.NewRouter(s, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	router := handler.NewRouter(s, nil, slog.New(slog.NewTextHandler(&logs, nil)), nil)
 	req := httptest.NewRequest(http.MethodPost, "/updates/", strings.NewReader(fmt.Sprintf("[%s]", goodElement)))
 	req.Header.Set("Content-Type", jsonType)
 	w := httptest.NewRecorder()

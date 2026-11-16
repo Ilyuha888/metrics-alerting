@@ -16,6 +16,7 @@ import (
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/Ilyuha888/metrics-alerting/internal/models"
 	"github.com/Ilyuha888/metrics-alerting/internal/retry"
+	"github.com/Ilyuha888/metrics-alerting/internal/sign"
 )
 
 const sendTimeout = 5 * time.Second
@@ -24,13 +25,16 @@ type Sender struct {
 	endpoint string
 	client   *http.Client
 	delays   []time.Duration
+	key      []byte
 }
 
-func NewSender(endpoint string) *Sender {
+// NewSender signs every request with key; an empty key sends no signature.
+func NewSender(endpoint string, key []byte) *Sender {
 	return &Sender{
 		endpoint: strings.TrimSuffix(endpoint, "/"),
 		client:   &http.Client{Timeout: sendTimeout},
 		delays:   retry.DefaultDelays,
+		key:      key,
 	}
 }
 
@@ -59,9 +63,14 @@ func (s *Sender) post(ctx context.Context, list []models.Metrics) error {
 		return err
 	}
 	body := buf.Bytes()
+	// The server checks the bytes as they travel, so the signature covers the gzip body.
+	var signature string
+	if len(s.key) > 0 {
+		signature = sign.Sum(s.key, body)
+	}
 
 	return retry.Do(ctx, s.delays, isDialFailure, func() error {
-		return s.postOnce(body)
+		return s.postOnce(body, signature)
 	})
 }
 
@@ -72,7 +81,7 @@ func isDialFailure(err error) bool {
 	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
-func (s *Sender) postOnce(body []byte) error {
+func (s *Sender) postOnce(body []byte, signature string) error {
 	url := fmt.Sprintf("%s/updates/", s.endpoint)
 	// A reader per attempt: one that an earlier attempt read would send nothing on a repeat.
 	// No context: a cut request may still have landed, and sending it again would count PollCount twice.
@@ -82,6 +91,9 @@ func (s *Sender) postOnce(body []byte) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", "gzip")
+	if signature != "" {
+		req.Header.Set(sign.Header, signature)
+	}
 
 	// The client's error already names the method and the URL.
 	resp, err := s.client.Do(req)

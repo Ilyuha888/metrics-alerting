@@ -15,6 +15,7 @@ type params struct {
 	reportInterval time.Duration
 	pollInterval   time.Duration
 	logLevel       slog.Level
+	key            string
 }
 
 // Env intervals are bare seconds ("5"), and env sees only the declared field type, so a
@@ -24,6 +25,7 @@ type envParams struct {
 	Address        string `env:"ADDRESS"`
 	ReportInterval string `env:"REPORT_INTERVAL"`
 	PollInterval   string `env:"POLL_INTERVAL"`
+	Key            string `env:"KEY"`
 }
 
 func parseParams(args []string) (params, error) {
@@ -39,6 +41,7 @@ func parseParams(args []string) (params, error) {
 	fs.Var((*config.Seconds)(&p.reportInterval), "r", "Reporting interval in seconds")
 	fs.Var((*config.Seconds)(&p.pollInterval), "p", "Polling interval in seconds")
 	fs.TextVar(&p.logLevel, "l", slog.LevelInfo, "log level")
+	fs.StringVar(&p.key, "k", "", "Key to sign reports with; empty sends them unsigned")
 
 	if err := fs.Parse(args); err != nil {
 		return p, err
@@ -62,6 +65,9 @@ func parseParams(args []string) (params, error) {
 		if err := (*config.Seconds)(&p.pollInterval).Set(e.PollInterval); err != nil {
 			return p, fmt.Errorf("POLL_INTERVAL: %w", err)
 		}
+	}
+	if e.Key != "" {
+		p.key = e.Key
 	}
 
 	if err := checkPositive(p.reportInterval, "r", "REPORT_INTERVAL", e.ReportInterval); err != nil {

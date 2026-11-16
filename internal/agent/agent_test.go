@@ -124,7 +124,7 @@ func TestAgent_step_RejectedBatchKeepsThePollsUntilOneLands(t *testing.T) {
 }
 
 func TestAgent_step_UnreachableServerKeepsThePollsAfterEveryDial(t *testing.T) {
-	sender := NewSender("http://" + closedPort(t))
+	sender := NewSender("http://"+closedPort(t), nil)
 	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
 	dials := countDials(sender)
 	a := New(NewCollector(), sender, time.Second, time.Second, discard)
@@ -361,7 +361,7 @@ func TestAgent_Run_LogsTheStopAndOnlyRealFailures(t *testing.T) {
 func TestAgent_Run_PauseCutOnARealSenderLogsNoErrorAndDialsOnce(t *testing.T) {
 	var logged bytes.Buffer
 	lg := slog.New(slog.NewTextHandler(&logged, nil))
-	sender := NewSender("http://" + closedPort(t))
+	sender := NewSender("http://"+closedPort(t), nil)
 	sender.SetDelays([]time.Duration{time.Hour})
 	dials := countDials(sender)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -393,7 +393,7 @@ func TestAgent_step_ClientTimeoutIsLoggedAsAFailure(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	defer srv.Close()
-	sender := NewSender(srv.URL)
+	sender := NewSender(srv.URL, nil)
 	sender.client.Timeout = 100 * time.Millisecond
 	a := New(NewCollector(), sender, time.Second, time.Second, lg)
 

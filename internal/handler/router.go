@@ -33,12 +33,13 @@ type handlers struct {
 }
 
 // NewRouter returns the routes; patterns alone answer 404 for a missing name, 405 for a wrong method.
-func NewRouter(s Storage, db Pinger, lg *slog.Logger) http.Handler {
+func NewRouter(s Storage, db Pinger, lg *slog.Logger, key []byte) http.Handler {
 	h := &handlers{storage: s, db: db, log: lg}
 
 	r := chi.NewRouter()
-	// Logging goes first, so it also records the 404s, 405s and gzip rejections the rest answer.
-	r.Use(WithLogging(lg), rejectUncleanPath, WithGzip)
+	// Logging goes first, so it also records the 404s, 405s, signature and gzip rejections the rest
+	// answer.
+	r.Use(WithLogging(lg), rejectUncleanPath, WithSignature(key), WithGzip)
 
 	r.Post("/update", h.updateJSON)
 	r.Post("/update/", h.updateJSON)

@@ -38,7 +38,7 @@ func TestRouter_Storage_GetsRequestContext(t *testing.T) {
 				gauges:   map[string]metrics.Gauge{"temp": 1.5},
 				counters: map[string]metrics.Counter{"hits": 1},
 			}
-			router := handler.NewRouter(fake, nil, discardLogger)
+			router := handler.NewRouter(fake, nil, discardLogger, nil)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			req := httptest.NewRequest(tt.method, tt.target, strings.NewReader(tt.body)).WithContext(ctx)
