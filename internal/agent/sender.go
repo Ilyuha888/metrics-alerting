@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,10 +55,14 @@ func (s *Sender) Send(ctx context.Context, snap Snapshot) error {
 	delta := int64(snap.PollCount)
 	list = append(list, models.Metrics{ID: "PollCount", MType: metrics.KindCounter, Delta: &delta})
 
-	return s.post(ctx, list)
+	var stamp string
+	if !snap.Taken.IsZero() {
+		stamp = strconv.FormatInt(snap.Taken.UnixNano(), 10)
+	}
+	return s.post(ctx, list, stamp)
 }
 
-func (s *Sender) post(ctx context.Context, list []models.Metrics) error {
+func (s *Sender) post(ctx context.Context, list []models.Metrics, stamp string) error {
 	buf, err := gzipJSON(list)
 	if err != nil {
 		return err
@@ -70,7 +75,7 @@ func (s *Sender) post(ctx context.Context, list []models.Metrics) error {
 	}
 
 	return retry.Do(ctx, s.delays, isDialFailure, func() error {
-		return s.postOnce(body, signature)
+		return s.postOnce(body, signature, stamp)
 	})
 }
 
@@ -81,7 +86,7 @@ func isDialFailure(err error) bool {
 	return errors.As(err, &opErr) && opErr.Op == "dial"
 }
 
-func (s *Sender) postOnce(body []byte, signature string) error {
+func (s *Sender) postOnce(body []byte, signature, stamp string) error {
 	url := fmt.Sprintf("%s/updates/", s.endpoint)
 	// A reader per attempt: one that an earlier attempt read would send nothing on a repeat.
 	// No context: a cut request may still have landed, and sending it again would count PollCount twice.
@@ -93,6 +98,9 @@ func (s *Sender) postOnce(body []byte, signature string) error {
 	req.Header.Set("Content-Encoding", "gzip")
 	if signature != "" {
 		req.Header.Set(sign.Header, signature)
+	}
+	if stamp != "" {
+		req.Header.Set(models.TimestampHeader, stamp)
 	}
 
 	// The client's error already names the method and the URL.

@@ -62,25 +62,31 @@ func TestCollector_Snapshot_LaterPollsLeaveSnapshot(t *testing.T) {
 	assert.Equal(t, taken, snap.Gauges["Alloc"])
 }
 
-func TestCollector_Reported_SubtractsDelivered(t *testing.T) {
+func TestCollector_Snapshot_TakesThePollCount(t *testing.T) {
 	c := NewCollector()
 	for range 5 {
 		c.Poll()
 	}
-	delivered := c.Snapshot()
-	require.Equal(t, metrics.Counter(5), delivered.PollCount)
 
-	c.Poll() // a tick between the snapshot and the acknowledgement
-	c.Reported(delivered)
+	first := c.Snapshot()
+	c.Poll()
+	second := c.Snapshot()
 
-	assert.Equal(t, metrics.Counter(1), c.Snapshot().PollCount)
+	assert.Equal(t, metrics.Counter(5), first.PollCount)
+	assert.Equal(t, metrics.Counter(1), second.PollCount, "a poll goes into one snapshot only")
+	assert.Equal(t, metrics.Counter(0), c.Snapshot().PollCount)
 }
 
-func TestCollector_Reported_NotCalledKeepsPolls(t *testing.T) {
+func TestCollector_Restore_AddsTheDeltaBack(t *testing.T) {
 	c := NewCollector()
-	c.Poll()
-	_ = c.Snapshot() // report failed, nothing acknowledged
-	c.Poll()
+	for range 5 {
+		c.Poll()
+	}
+	failed := c.Snapshot()
+	require.Equal(t, metrics.Counter(5), failed.PollCount)
 
-	assert.Equal(t, metrics.Counter(2), c.Snapshot().PollCount)
+	c.Poll()
+	c.Restore(failed)
+
+	assert.Equal(t, metrics.Counter(6), c.Snapshot().PollCount)
 }

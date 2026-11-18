@@ -469,11 +469,12 @@ func TestSender_Send_SignsTheGzipBodyOnlyWithAKey(t *testing.T) {
 
 type headerRecorder struct {
 	next    http.RoundTripper
+	name    string
 	headers []string
 }
 
 func (h *headerRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
-	h.headers = append(h.headers, req.Header.Get(sign.Header))
+	h.headers = append(h.headers, req.Header.Get(h.name))
 	return h.next.RoundTrip(req)
 }
 
@@ -483,7 +484,7 @@ func TestSender_Send_RepeatAfterADialFailureCarriesTheSameSignature(t *testing.T
 	addr := closedPort(t)
 	sender := NewSender("http://"+addr, key)
 	sender.SetDelays([]time.Duration{pause})
-	attempts := &headerRecorder{next: &http.Transport{}}
+	attempts := &headerRecorder{next: &http.Transport{}, name: sign.Header}
 	sender.client.Transport = attempts
 	rec := &recorder{status: http.StatusOK}
 	serveAfter(t, addr, opensAfter, rec)
@@ -493,4 +494,40 @@ func TestSender_Send_RepeatAfterADialFailureCarriesTheSameSignature(t *testing.T
 	require.Len(t, rec.got, 1)
 	want := sign.Sum(key, rec.got[0].raw)
 	assert.Equal(t, []string{want, want}, attempts.headers)
+}
+
+func TestSender_Send_StampsTheBatchOnlyWithATime(t *testing.T) {
+	tests := []struct {
+		name  string
+		taken time.Time
+		want  string
+	}{
+		{name: "time sends Unix nanoseconds", taken: time.Unix(1_700_000_000, 123), want: "1700000000000000123"},
+		{name: "zero time sends no header", taken: time.Time{}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender, _ := recordingServer(t, http.StatusOK)
+			attempts := &headerRecorder{next: &http.Transport{}, name: models.TimestampHeader}
+			sender.client.Transport = attempts
+
+			require.NoError(t, sender.Send(t.Context(), Snapshot{PollCount: 1, Taken: tt.taken}))
+
+			assert.Equal(t, []string{tt.want}, attempts.headers)
+		})
+	}
+}
+
+func TestSender_Send_RepeatAfterADialFailureCarriesTheSameStamp(t *testing.T) {
+	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
+	addr := closedPort(t)
+	sender := NewSender("http://"+addr, nil)
+	sender.SetDelays([]time.Duration{pause})
+	attempts := &headerRecorder{next: &http.Transport{}, name: models.TimestampHeader}
+	sender.client.Transport = attempts
+	serveAfter(t, addr, opensAfter, &recorder{status: http.StatusOK})
+
+	require.NoError(t, sender.Send(t.Context(), Snapshot{PollCount: 1, Taken: time.Unix(0, 42)}))
+
+	assert.Equal(t, []string{"42", "42"}, attempts.headers)
 }

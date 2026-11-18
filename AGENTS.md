@@ -15,10 +15,12 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
   so any code used by both lives here.
 - `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `Batch`, `ErrNotFound`.
   Both storage and handler import it, so neither has to import the other.
-- `internal/models/` — `Metrics`, the JSON wire format the agent sends and the server reads and answers.
+- `internal/models/` — `Metrics`, the JSON wire format the agent sends and the server reads and answers;
+  `TimestampHeader`, the batch stamp both sides use.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default;
   `Seconds`, the bare-seconds interval flag type.
-- `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-l` flag.
+- `internal/logger/` — `New`, the `log/slog` logger both binaries build from their log-level flag:
+  `-l` on the server, `-log-level` on the agent, whose `-l` is the rate limit.
 - `internal/retry/` — `Do`, which repeats an operation on a retriable error, and `DefaultDelays`.
 - `internal/storage/memstorage/` — `Storage`, the in-memory `handler.Storage`.
 - `internal/storage/filestore/` — `Storage`, which wraps `memstorage.Storage` and saves it to a JSON file
@@ -28,7 +30,8 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/storage/pgstore/` — `Storage`, the `handler.Storage` on PostgreSQL, over the pool from `database`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
   interfaces it needs, and passes the request's context to both.
-- `internal/agent/` — collector, sender and the polling loop, which runs until its context is done.
+- `internal/agent/` — `Collector` (runtime), `SystemCollector` (gopsutil: memory and CPU load), `Sender`,
+  and `Agent`: two pollers, a reporter and `RateLimit` workers that send, all running until the context is done.
 
 Do not create a directory before something goes in it. Git does not track empty
 directories, and an empty package is noise.
@@ -128,27 +131,46 @@ so a second run of an update that landed would count twice, and which failures r
 
 ## Stopping the agent
 
+The agent runs four kinds of goroutine: a runtime poller and a system poller, each on `pollInterval`; a reporter
+on its own `reportInterval` ticker, which takes one snapshot and hands it to a worker over an unbuffered channel;
+and `RateLimit` workers, each sending one snapshot at a time. While every worker is busy, the reporter waits and
+its ticker drops the ticks it misses. A snapshot takes the PollCount delta from the collector; a failed send
+puts it back with `Restore`, so no poll is in two snapshots at once, however many sends are in flight.
+
 SIGINT or SIGTERM cancels the context `Run` got from `main`. The signal interrupts pauses only: a request
 in flight waits for its answer, up to the client's 5 s timeout, since a cut request may have landed and a
 repeat would count `PollCount` twice.
 
-- Signal outside a send, or during a send that succeeded: one last report goes out, without `Reported`, on
-  its own context of 5 s. That context stops only its pauses, so a request started at 4 s can hold it to 9 s.
-- Signal during a send that ends in an error: no last report, and the polls since the last report are lost.
+- The pollers and the reporter stop. A snapshot the reporter held for a worker goes back to the collector. The
+  reporter closes the channel, and `Run` waits until every worker has finished its send.
+- No send in flight at the signal ended in an error: one last report goes out with everything left, restored
+  deltas included, on its own context of 5 s. That context stops only its pauses, so a request started at 4 s
+  can hold it to 9 s.
+- A send in flight at the signal ended in an error: no last report, and the polls not yet delivered are lost.
 - A pause the signal cut is not logged as a `send metrics` error. A real failure is.
 - Then `agent stopped` at Info, `Run` returns, the process exits 0.
+
+## Batch order
+
+Several workers send at once, so batches can reach the server out of order. The reporter stamps each
+snapshot with the time it took it, and `Sender` puts that time in `X-Metrics-Timestamp` as Unix
+nanoseconds, the same value on every attempt. A zero time sends no header.
+
+On `POST /updates/` with the header, the handler keeps, per gauge, the stamp of the batch that last wrote
+it. Under one lock it drops the gauges whose stamp is not newer than the stored one, writes the rest with
+`UpdateBatch`, and records their stamps only if the write succeeded. Counters are always added.
+
+- No header (the autotests, `/update/`, `POST /update`): stored as before; no check, no stamp recorded.
+- A header that is not a decimal integer: 400, nothing stored.
+- Stamps live in the handler's memory only. The storages do not know them, and a restarted server takes
+  the first stamped batch as is.
+- The `HashSHA256` signature covers the body, not this header.
 
 ## Known debt
 
 - The server does not save on SIGINT or SIGTERM, so metrics newer than the last save are
   lost when it stops. Saving on shutdown needs signal handling and a graceful
   `Shutdown`, which wait for the sprint on goroutines.
-- The agent reports on every Nth poll, where N is `reportInterval / pollInterval` rounded
-  down, so intervals that do not divide evenly report early: `-p 3 -r 10` reports every
-  9 seconds. Exact timing needs a separate reporting timer, which waits for the sprint on
-  goroutines.
-- The agent does not poll during the pauses between send attempts, up to 9 seconds, because one
-  goroutine does both jobs. Polling through them waits for the sprint on goroutines.
 
 ## Updating the template
 

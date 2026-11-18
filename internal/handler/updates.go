@@ -11,6 +11,11 @@ import (
 const maxBatchBody = 1 << 20
 
 func (h *handlers) updates(w http.ResponseWriter, r *http.Request) {
+	stamp, stamped, err := batchStamp(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBatchBody)
 
 	var list []models.Metrics
@@ -27,7 +32,13 @@ func (h *handlers) updates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(list) > 0 {
-		if err := h.storage.UpdateBatch(r.Context(), mergeBatch(list)); err != nil {
+		b := mergeBatch(list)
+		if stamped {
+			err = h.stamps.update(r.Context(), h.storage, b, stamp)
+		} else {
+			err = h.storage.UpdateBatch(r.Context(), b)
+		}
+		if err != nil {
 			h.writeError(w, err)
 			return
 		}

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/config"
@@ -16,6 +18,7 @@ type params struct {
 	pollInterval   time.Duration
 	logLevel       slog.Level
 	key            string
+	rateLimit      int
 }
 
 // Env intervals are bare seconds ("5"), and env sees only the declared field type, so a
@@ -26,6 +29,7 @@ type envParams struct {
 	ReportInterval string `env:"REPORT_INTERVAL"`
 	PollInterval   string `env:"POLL_INTERVAL"`
 	Key            string `env:"KEY"`
+	RateLimit      string `env:"RATE_LIMIT"`
 }
 
 func parseParams(args []string) (params, error) {
@@ -36,12 +40,14 @@ func parseParams(args []string) (params, error) {
 	p.address = config.DefaultAddress()
 	p.pollInterval = 2 * time.Second
 	p.reportInterval = 10 * time.Second
+	p.rateLimit = 1
 
 	fs.Var(&p.address, "a", "Net address host:port")
 	fs.Var((*config.Seconds)(&p.reportInterval), "r", "Reporting interval in seconds")
 	fs.Var((*config.Seconds)(&p.pollInterval), "p", "Polling interval in seconds")
-	fs.TextVar(&p.logLevel, "l", slog.LevelInfo, "log level")
+	fs.TextVar(&p.logLevel, "log-level", slog.LevelInfo, "log level")
 	fs.StringVar(&p.key, "k", "", "Key to sign reports with; empty sends them unsigned")
+	fs.IntVar(&p.rateLimit, "l", p.rateLimit, "Reports in flight at once")
 
 	if err := fs.Parse(args); err != nil {
 		return p, err
@@ -69,11 +75,21 @@ func parseParams(args []string) (params, error) {
 	if e.Key != "" {
 		p.key = e.Key
 	}
+	if e.RateLimit != "" {
+		n, err := strconv.Atoi(e.RateLimit)
+		if err != nil {
+			return p, fmt.Errorf("RATE_LIMIT: %w", err)
+		}
+		p.rateLimit = n
+	}
 
 	if err := checkPositive(p.reportInterval, "r", "REPORT_INTERVAL", e.ReportInterval); err != nil {
 		return p, err
 	}
 	if err := checkPositive(p.pollInterval, "p", "POLL_INTERVAL", e.PollInterval); err != nil {
+		return p, err
+	}
+	if err := checkRateLimit(p.rateLimit, e.RateLimit); err != nil {
 		return p, err
 	}
 
@@ -90,4 +106,16 @@ func checkPositive(d time.Duration, flagName, envName, envValue string) error {
 		return fmt.Errorf("%s: must be greater than 0", envName)
 	}
 	return fmt.Errorf("invalid value %q for flag -%s: must be greater than 0", (*config.Seconds)(&d).String(), flagName)
+}
+
+// checkRateLimit names the env variable when it set the value and the flag otherwise, as
+// checkPositive does.
+func checkRateLimit(n int, envValue string) error {
+	if n > 0 {
+		return nil
+	}
+	if envValue != "" {
+		return errors.New("RATE_LIMIT: must be greater than 0")
+	}
+	return fmt.Errorf("invalid value %q for flag -l: must be greater than 0", strconv.Itoa(n))
 }
