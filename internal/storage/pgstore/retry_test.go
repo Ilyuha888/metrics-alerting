@@ -8,6 +8,8 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -25,11 +27,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// proxy forwards a port to the real database once opened. Until then nothing listens there, so the
-// driver sees a real refused connection without the container being stopped.
+// socketName is the file pgx dials in a socket directory for port 5432.
+const socketName = ".s.PGSQL.5432"
+
+// proxy forwards a Unix socket to the real database once opened. Until then the socket's file is there
+// with nobody listening, so the driver sees a real refused connection without the container being
+// stopped. A released TCP port can be taken by another process before the dial; this path is the test's
+// own.
 type proxy struct {
 	t           *testing.T
-	addr        string
+	dir         string
 	target      string
 	connections atomic.Int32
 
@@ -41,13 +48,29 @@ type proxy struct {
 
 func newProxy(t *testing.T, target string) *proxy {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	// Not t.TempDir: it names the directory after the test, past the 104 bytes macOS allows a socket path.
+	dir, err := os.MkdirTemp("", "pg")
 	require.NoError(t, err)
-	addr := l.Addr().String()
+	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(dir)) })
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, socketName), Net: "unix"})
+	require.NoError(t, err)
+	// Without the file the dial fails with "no such file", not a refusal.
+	l.SetUnlinkOnClose(false)
 	require.NoError(t, l.Close())
-	p := &proxy{t: t, addr: addr, target: target}
+	p := &proxy{t: t, dir: dir, target: target}
 	t.Cleanup(p.close)
 	return p
+}
+
+// through points u at the proxy. The port is set so a PGPORT in the environment cannot change the
+// socket's file name.
+func (p *proxy) through(u *url.URL) {
+	u.Host = ""
+	q := u.Query()
+	q.Set("host", p.dir)
+	q.Set("port", "5432")
+	q.Set("sslmode", "disable")
+	u.RawQuery = q.Encode()
 }
 
 func (p *proxy) open() {
@@ -56,7 +79,12 @@ func (p *proxy) open() {
 	if p.closed {
 		return
 	}
-	l, err := net.Listen("tcp", p.addr)
+	path := filepath.Join(p.dir, socketName)
+	// A listen on a path that exists fails, and the refusing socket's file is still there.
+	if !assert.NoError(p.t, os.Remove(path)) {
+		return
+	}
+	l, err := net.Listen("unix", path)
 	if !assert.NoError(p.t, err) {
 		return
 	}
@@ -125,10 +153,7 @@ func newBehindProxy(t *testing.T) *behindProxy {
 	u, err := url.Parse(dsn)
 	require.NoError(t, err)
 	p := newProxy(t, u.Host)
-	u.Host = p.addr
-	q := u.Query()
-	q.Set("sslmode", "disable")
-	u.RawQuery = q.Encode()
+	p.through(u)
 
 	db, err := sql.Open("pgx", u.String())
 	require.NoError(t, err)
@@ -145,7 +170,7 @@ const (
 	pause      = 600 * time.Millisecond
 )
 
-func TestStorage_Outage_EveryMethodSucceedsOnceThePortOpens(t *testing.T) {
+func TestStorage_Outage_EveryMethodSucceedsOnceTheProxyOpens(t *testing.T) {
 	for _, tt := range everyMethod {
 		t.Run(tt.name, func(t *testing.T) {
 			b := newBehindProxy(t)
@@ -243,7 +268,7 @@ func TestStorage_New_RepeatsWithTheDefaultDelays(t *testing.T) {
 	assert.ErrorContains(t, err, "stopped after attempt 1")
 }
 
-func TestStorage_ClosedPort_ErrorsAfterEveryAttempt(t *testing.T) {
+func TestStorage_RefusedConnection_ErrorsAfterEveryAttempt(t *testing.T) {
 	delays := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 30 * time.Millisecond}
 	for _, tt := range everyMethod {
 		t.Run(tt.name, func(t *testing.T) {
@@ -729,11 +754,8 @@ func TestStorage_UpdateBatch_BeginFailureThatIsNotALostConnection_MakesOneAttemp
 	require.NoError(t, err)
 	p := newProxy(t, u.Host)
 	p.open()
-	u.Host = p.addr
+	p.through(u)
 	u.User = url.UserPassword(u.User.Username(), "wrong")
-	q := u.Query()
-	q.Set("sslmode", "disable")
-	u.RawQuery = q.Encode()
 	db, err := sql.Open("pgx", u.String())
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, db.Close()) })

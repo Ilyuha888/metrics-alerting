@@ -7,12 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -127,9 +124,9 @@ func TestAgent_send_RejectedBatchKeepsThePollsUntilOneLands(t *testing.T) {
 }
 
 func TestAgent_send_UnreachableServerKeepsThePollsAfterEveryDial(t *testing.T) {
-	sender := NewSender("http://"+closedPort(t), nil)
+	sender := NewSender(unreachable, nil)
 	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
-	dials := countDials(sender)
+	dials := refuseDials(sender, everyDial)
 	a := newAgent(sender, config(time.Second, time.Second, 1), discard)
 
 	require.Error(t, pollAndSend(t, a))
@@ -626,17 +623,9 @@ func TestAgent_Run_LogsTheStopAndOnlyRealFailures(t *testing.T) {
 func TestAgent_Run_PauseCutOnARealSenderLogsNoErrorAndDialsOnce(t *testing.T) {
 	var logged bytes.Buffer
 	lg := slog.New(slog.NewTextHandler(&logged, nil))
-	sender := NewSender("http://metrics.invalid", nil)
+	sender := NewSender(unreachable, nil)
 	sender.SetDelays([]time.Duration{time.Hour})
-	dials := new(atomic.Int32)
-	// A refusal without the network: a released port can be taken by another process before the dial,
-	// and a server answering 200 there ends the send early and lets a last report dial again.
-	sender.client.Transport = &http.Transport{
-		DialContext: func(context.Context, string, string) (net.Conn, error) {
-			dials.Add(1)
-			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
-		},
-	}
+	dials := refuseDials(sender, everyDial)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan struct{})

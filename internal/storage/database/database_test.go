@@ -13,10 +13,12 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -112,13 +114,31 @@ func openerGoroutines() int {
 	return strings.Count(string(buf), "database/sql.(*DB).connectionOpener")
 }
 
-func closedPort(t *testing.T) string {
+// socketName is the file pgx dials in a socket directory for port 5432.
+const socketName = ".s.PGSQL.5432"
+
+// refusingSocketDir returns a directory holding a Unix socket nobody listens on, so a dial there is
+// refused by the kernel. A released TCP port can be taken by another process before the dial; this
+// path is the test's own.
+func refusingSocketDir(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	// Not t.TempDir: it names the directory after the test, past the 104 bytes macOS allows a socket path.
+	dir, err := os.MkdirTemp("", "pg")
 	require.NoError(t, err)
-	addr := l.Addr().String()
+	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(dir)) })
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, socketName), Net: "unix"})
+	require.NoError(t, err)
+	// Without the file the dial fails with "no such file", not a refusal.
+	l.SetUnlinkOnClose(false)
 	require.NoError(t, l.Close())
-	return addr
+	return dir
+}
+
+// refusedDSN points at a refusingSocketDir. The port is set so a PGPORT in the environment cannot
+// change the socket's file name.
+func refusedDSN(t *testing.T, password string) string {
+	t.Helper()
+	return fmt.Sprintf("postgres://u:%s@/x?host=%s&port=5432&sslmode=disable", password, refusingSocketDir(t))
 }
 
 // silentPort accepts connections and never answers, as a stuck database does.
@@ -148,8 +168,8 @@ func TestOpen_UnusableDatabase_ReturnsErrorInTimeAndLeavesNoPool(t *testing.T) {
 		name string
 		dsn  func(t *testing.T) string
 	}{
-		{name: "closed port", dsn: func(t *testing.T) string {
-			return fmt.Sprintf("postgres://u:secretpw@%s/x?sslmode=disable", closedPort(t))
+		{name: "refused connection", dsn: func(t *testing.T) string {
+			return refusedDSN(t, "secretpw")
 		}},
 		{name: "server that never answers", dsn: func(t *testing.T) string {
 			return fmt.Sprintf("postgres://u:secretpw@%s/x?sslmode=disable", silentPort(t))
@@ -190,11 +210,11 @@ func TestOpen_UnusableDatabase_ReturnsErrorInTimeAndLeavesNoPool(t *testing.T) {
 	}
 }
 
-// proxy forwards a port to the real database once opened. Until then nothing listens there, so the
-// driver sees a real refused connection without the container being stopped.
+// proxy forwards a Unix socket to the real database once opened. Until then nothing listens there, so
+// the driver sees a real refused connection without the container being stopped.
 type proxy struct {
 	t           *testing.T
-	addr        string
+	dir         string
 	target      string
 	connections atomic.Int32
 
@@ -206,7 +226,7 @@ type proxy struct {
 
 func newProxy(t *testing.T, target string) *proxy {
 	t.Helper()
-	p := &proxy{t: t, addr: closedPort(t), target: target}
+	p := &proxy{t: t, dir: refusingSocketDir(t), target: target}
 	t.Cleanup(p.close)
 	return p
 }
@@ -217,7 +237,12 @@ func (p *proxy) open() {
 	if p.closed {
 		return
 	}
-	l, err := net.Listen("tcp", p.addr)
+	path := filepath.Join(p.dir, socketName)
+	// A listen on a path that exists fails, and the refusing socket's file is still there.
+	if !assert.NoError(p.t, os.Remove(path)) {
+		return
+	}
+	l, err := net.Listen("unix", path)
 	if !assert.NoError(p.t, err) {
 		return
 	}
@@ -273,8 +298,10 @@ func (p *proxy) through(t *testing.T, dsn string) string {
 	t.Helper()
 	u, err := url.Parse(dsn)
 	require.NoError(t, err)
-	u.Host = p.addr
+	u.Host = ""
 	q := u.Query()
+	q.Set("host", p.dir)
+	q.Set("port", "5432")
 	q.Set("sslmode", "disable")
 	u.RawQuery = q.Encode()
 	return u.String()
@@ -302,11 +329,11 @@ func TestOpen_DatabaseComingUpDuringAPause_Succeeds(t *testing.T) {
 	assert.True(t, tableExists(t, db, "gauges"))
 }
 
-func TestOpen_ClosedPort_ErrorsAfterEveryAttempt(t *testing.T) {
+func TestOpen_RefusedConnection_ErrorsAfterEveryAttempt(t *testing.T) {
 	delays := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 30 * time.Millisecond}
 	start := time.Now()
 
-	db, err := open(t.Context(), fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)), delays)
+	db, err := open(t.Context(), refusedDSN(t, "p"), delays)
 
 	assert.Nil(t, db)
 	var connectErr *pgconn.ConnectError
@@ -315,13 +342,13 @@ func TestOpen_ClosedPort_ErrorsAfterEveryAttempt(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), 60*time.Millisecond)
 }
 
-func TestOpen_ClosedPort_StopsAtTheContextBound(t *testing.T) {
+func TestOpen_RefusedConnection_StopsAtTheContextBound(t *testing.T) {
 	const timeout = 300 * time.Millisecond
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	start := time.Now()
 
-	db, err := Open(ctx, fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)))
+	db, err := Open(ctx, refusedDSN(t, "p"))
 
 	assert.Nil(t, db)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
@@ -457,10 +484,11 @@ func TestIsRetriable_RealFailures_OnlyAnUnsentStatementRepeats(t *testing.T) {
 		{
 			name: "refused connection",
 			err: func(t *testing.T) error {
-				return pingError(t, fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)), time.Second)
+				return pingError(t, refusedDSN(t, "p"), time.Second)
 			},
 			wantConnectErr: true,
 			wantRetriable:  true,
+			wantIsErr:      syscall.ECONNREFUSED,
 		},
 		{
 			name: "connect that times out sent no statement",
@@ -622,9 +650,10 @@ func TestIsConnectionLost_RealFailures_OnlyALostConnectionCounts(t *testing.T) {
 		{
 			name: "refused connection",
 			err: func(t *testing.T) error {
-				err := pingError(t, fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)), time.Second)
+				err := pingError(t, refusedDSN(t, "p"), time.Second)
 				var connectErr *pgconn.ConnectError
 				require.ErrorAs(t, err, &connectErr)
+				require.ErrorIs(t, err, syscall.ECONNREFUSED)
 				return err
 			},
 		},

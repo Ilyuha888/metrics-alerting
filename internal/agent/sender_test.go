@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -227,60 +230,29 @@ func TestSender_Send_UnreachableServerIsAnError(t *testing.T) {
 	assert.Empty(t, rec.got)
 }
 
-func closedPort(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-	return addr
-}
+// unreachable is never dialled: refuseDials(sender, everyDial) refuses before any lookup.
+const unreachable, everyDial = "http://metrics.invalid", math.MaxInt32
 
-// countDials counts every dial the sender makes. It dials for real, so a closed port still refuses.
-func countDials(sender *Sender) *atomic.Int32 {
+// refuseDials refuses the sender's first n dials without the network and makes the rest for real; it
+// counts every dial. A released port can be taken by another process before the dial and answer it.
+func refuseDials(sender *Sender, n int32) *atomic.Int32 {
 	dials := new(atomic.Int32)
 	dialer := &net.Dialer{}
 	sender.client.Transport = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dials.Add(1)
+			if dials.Add(1) <= n {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+			}
 			return dialer.DialContext(ctx, network, addr)
 		},
 	}
 	return dials
 }
 
-// serveAfter starts h on addr after d. The first dial has d to be refused, far more than a refusal
-// on loopback takes.
-func serveAfter(t *testing.T, addr string, d time.Duration, h http.Handler) {
-	t.Helper()
-	started := make(chan *httptest.Server, 1)
-	time.AfterFunc(d, func() {
-		srv := httptest.NewUnstartedServer(h)
-		srv.Listener.Close()
-		l, err := net.Listen("tcp", addr)
-		if !assert.NoError(t, err) {
-			started <- nil
-			return
-		}
-		srv.Listener = l
-		srv.Start()
-		started <- srv
-	})
-	t.Cleanup(func() {
-		if srv := <-started; srv != nil {
-			srv.Close()
-		}
-	})
-}
-
 func TestSender_Send_ServerComingUpDuringAPauseGetsTheWholeBody(t *testing.T) {
-	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
-	addr := closedPort(t)
-	sender := NewSender("http://"+addr, nil)
-	sender.SetDelays([]time.Duration{pause})
-	dials := countDials(sender)
-	rec := &recorder{status: http.StatusOK}
-	serveAfter(t, addr, opensAfter, rec)
+	sender, rec := recordingServer(t, http.StatusOK)
+	sender.SetDelays([]time.Duration{time.Millisecond})
+	dials := refuseDials(sender, 1)
 
 	err := sender.Send(t.Context(), Snapshot{Gauges: map[string]metrics.Gauge{"a": 1.5, "b": 2.5}, PollCount: 3})
 
@@ -295,10 +267,10 @@ func TestSender_Send_ServerComingUpDuringAPauseGetsTheWholeBody(t *testing.T) {
 	}, decodeBody(t, rec.got[0].body))
 }
 
-func TestSender_Send_ClosedPortDialsFourTimes(t *testing.T) {
-	sender := NewSender("http://"+closedPort(t), nil)
+func TestSender_Send_RefusedDialDialsFourTimes(t *testing.T) {
+	sender := NewSender(unreachable, nil)
 	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
-	dials := countDials(sender)
+	dials := refuseDials(sender, everyDial)
 
 	err := sender.Send(t.Context(), Snapshot{PollCount: 1})
 
@@ -379,9 +351,9 @@ func TestSender_Send_FailureAfterTheRequestWentOutIsNotRepeated(t *testing.T) {
 }
 
 func TestSender_Send_CancelDuringAPauseReturnsAtOnce(t *testing.T) {
-	sender := NewSender("http://"+closedPort(t), nil)
+	sender := NewSender(unreachable, nil)
 	sender.SetDelays([]time.Duration{time.Hour, time.Hour})
-	dials := countDials(sender)
+	dials := refuseDials(sender, everyDial)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	result := make(chan error, 1)
@@ -479,15 +451,15 @@ func (h *headerRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestSender_Send_RepeatAfterADialFailureCarriesTheSameSignature(t *testing.T) {
-	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
 	key := []byte("secret")
-	addr := closedPort(t)
-	sender := NewSender("http://"+addr, key)
-	sender.SetDelays([]time.Duration{pause})
-	attempts := &headerRecorder{next: &http.Transport{}, name: sign.Header}
-	sender.client.Transport = attempts
 	rec := &recorder{status: http.StatusOK}
-	serveAfter(t, addr, opensAfter, rec)
+	srv := httptest.NewServer(rec)
+	t.Cleanup(srv.Close)
+	sender := NewSender(srv.URL, key)
+	sender.SetDelays([]time.Duration{time.Millisecond})
+	refuseDials(sender, 1)
+	attempts := &headerRecorder{next: sender.client.Transport, name: sign.Header}
+	sender.client.Transport = attempts
 
 	require.NoError(t, sender.Send(t.Context(), Snapshot{PollCount: 1}))
 
@@ -519,13 +491,11 @@ func TestSender_Send_StampsTheBatchOnlyWithATime(t *testing.T) {
 }
 
 func TestSender_Send_RepeatAfterADialFailureCarriesTheSameStamp(t *testing.T) {
-	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
-	addr := closedPort(t)
-	sender := NewSender("http://"+addr, nil)
-	sender.SetDelays([]time.Duration{pause})
-	attempts := &headerRecorder{next: &http.Transport{}, name: models.TimestampHeader}
+	sender, _ := recordingServer(t, http.StatusOK)
+	sender.SetDelays([]time.Duration{time.Millisecond})
+	refuseDials(sender, 1)
+	attempts := &headerRecorder{next: sender.client.Transport, name: models.TimestampHeader}
 	sender.client.Transport = attempts
-	serveAfter(t, addr, opensAfter, &recorder{status: http.StatusOK})
 
 	require.NoError(t, sender.Send(t.Context(), Snapshot{PollCount: 1, Taken: time.Unix(0, 42)}))
 
