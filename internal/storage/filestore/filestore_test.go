@@ -2,11 +2,13 @@ package filestore_test
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
@@ -199,23 +201,60 @@ func TestStorage_SetGauge_FailedSaveReturnsErrorAndKeepsValue(t *testing.T) {
 	assert.Equal(t, "metrics.json", entries[0].Name())
 }
 
-func TestStorage_SaveEvery_WritesTheFile(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "dumps")
-	path := filepath.Join(dir, "metrics.json")
-	st := newStorage(t, path, 10*time.Millisecond)
-	st.SetGauge(t.Context(), "temp", 36.6)
-	// SaveEvery cannot be stopped, so it may write while TempDir cleans up. Once dir is
-	// gone every later save fails, and the retry outlasts a save that was mid-write.
-	t.Cleanup(func() {
-		assert.Eventually(t, func() bool { return os.RemoveAll(dir) == nil }, time.Second, 10*time.Millisecond)
+// runSaveEvery starts SaveEvery and returns a channel closed when it returns.
+func runSaveEvery(ctx context.Context, st *filestore.Storage) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		st.SaveEvery(ctx)
+	}()
+	return done
+}
+
+func returned(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+func TestStorage_SaveEvery_WritesTheFileOnATick(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "dumps", "metrics.json")
+		st := newStorage(t, path, 10*time.Millisecond)
+		require.NoError(t, st.SetGauge(t.Context(), "temp", 36.6))
+		ctx, cancel := context.WithCancel(t.Context())
+		done := runSaveEvery(ctx, st)
+
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+
+		got, err := restoreStorage(t, path, time.Hour).Gauge(t.Context(), "temp")
+		require.NoError(t, err)
+		assert.Equal(t, metrics.Gauge(36.6), got)
+		cancel()
+		synctest.Wait()
+		assert.True(t, returned(done))
 	})
+}
 
-	go st.SaveEvery()
+func TestStorage_SaveEvery_ReturnsOnCancelWithoutSaving(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "metrics.json")
+		st := newStorage(t, path, time.Hour)
+		require.NoError(t, st.SetGauge(t.Context(), "temp", 36.6))
+		ctx, cancel := context.WithCancel(t.Context())
+		done := runSaveEvery(ctx, st)
 
-	assert.Eventually(t, func() bool {
+		cancel()
+		synctest.Wait()
+
+		assert.True(t, returned(done), "SaveEvery is still running after cancel")
 		_, err := os.Stat(path)
-		return err == nil
-	}, time.Second, 5*time.Millisecond)
+		assert.ErrorIs(t, err, os.ErrNotExist, "the last save is the caller's, after the server stops")
+	})
 }
 
 func TestStorage_UpdateBatch_SavesOnceOnlyWithZeroInterval(t *testing.T) {

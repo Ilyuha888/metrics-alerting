@@ -181,13 +181,19 @@ func (s *Storage) saveIfSync() error {
 	return s.syncSave()
 }
 
-// SaveEvery never returns; run it in its own goroutine.
-func (s *Storage) SaveEvery() {
+// SaveEvery saves on each tick until ctx is done; run it in its own goroutine. It makes no save on
+// the way out: requests may still be writing then, so the caller saves once after the server stops.
+func (s *Storage) SaveEvery(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		if err := s.Save(); err != nil {
-			s.log.Error("save metrics", "err", err)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.Save(); err != nil {
+				s.log.Error("save metrics", "err", err)
+			}
 		}
 	}
 }

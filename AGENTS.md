@@ -150,6 +150,23 @@ repeat would count `PollCount` twice.
 - A pause the signal cut is not logged as a `send metrics` error. A real failure is.
 - Then `agent stopped` at Info, `Run` returns, the process exits 0.
 
+## Stopping the server
+
+SIGINT or SIGTERM cancels the context `run` builds with `signal.NotifyContext`. A second signal after that
+kills the process at once, with no last save.
+
+- `http.Server.Shutdown` stops accepting connections and waits for the requests in flight, up to
+  `shutdownTimeout`, 10 s. Past it the error is logged and `Close` cuts the connections left.
+- `SaveEvery` stops on the same context and makes no save of its own; `run` waits for it to return, so
+  two saves never overlap.
+- With file storage, one last `Save`, whatever `-i` is: it comes after every write Shutdown waited for. If
+  it fails, `run` returns the error and the process exits 1.
+- With a database, the pool closes when `run` returns, after Shutdown.
+- Then `server stopped` at Info and exit 0. A listen error (a port in use) still ends `run` at once with
+  that error and exit 1.
+- A signal while `database.Open` is still retrying at start ends it: `stopped during startup` at Info with
+  the error, exit 0.
+
 ## Batch order
 
 Several workers send at once, so batches can reach the server out of order. The reporter stamps each
@@ -168,12 +185,6 @@ it. Under one lock it drops the gauges whose stamp is not newer than the stored 
 - Stamps live in the handler's memory only. The storages do not know them, and a restarted server takes
   the first stamped batch as is.
 - The `HashSHA256` signature covers the body, not this header.
-
-## Known debt
-
-- The server does not save on SIGINT or SIGTERM, so metrics newer than the last save are
-  lost when it stops. Saving on shutdown needs signal handling and a graceful
-  `Shutdown`, which wait for the sprint on goroutines.
 
 ## Updating the template
 
