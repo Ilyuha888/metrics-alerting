@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -623,9 +626,17 @@ func TestAgent_Run_LogsTheStopAndOnlyRealFailures(t *testing.T) {
 func TestAgent_Run_PauseCutOnARealSenderLogsNoErrorAndDialsOnce(t *testing.T) {
 	var logged bytes.Buffer
 	lg := slog.New(slog.NewTextHandler(&logged, nil))
-	sender := NewSender("http://"+closedPort(t), nil)
+	sender := NewSender("http://metrics.invalid", nil)
 	sender.SetDelays([]time.Duration{time.Hour})
-	dials := countDials(sender)
+	dials := new(atomic.Int32)
+	// A refusal without the network: a released port can be taken by another process before the dial,
+	// and a server answering 200 there ends the send early and lets a last report dial again.
+	sender.client.Transport = &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			dials.Add(1)
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+		},
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan struct{})
