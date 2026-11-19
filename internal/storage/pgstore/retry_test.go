@@ -306,6 +306,7 @@ func TestStorage_Read_NotFoundStaysTheSameError(t *testing.T) {
 	_, gaugeErr := b.store.Gauge(t.Context(), "nope")
 	_, counterErr := b.store.Counter(t.Context(), "nope")
 
+	// == on purpose: retry.Do must hand a non-retriable error back unwrapped, and ErrorIs would pass a wrapped one.
 	assert.True(t, gaugeErr == metrics.ErrNotFound)
 	assert.True(t, counterErr == metrics.ErrNotFound)
 }

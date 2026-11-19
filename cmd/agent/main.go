@@ -30,7 +30,7 @@ func run() error {
 		return err
 	}
 
-	serverEndpoint := "http://" + p.address.String()
+	serverEndpoint := p.address.URL("http")
 	pollInterval := p.pollInterval
 	reportInterval := p.reportInterval
 	lg := logger.New(p.logLevel)

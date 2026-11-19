@@ -108,7 +108,9 @@ func run() error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		lg.Error("requests still running at the shutdown timeout, closing their connections", "err", err)
-		srv.Close()
+		if err := srv.Close(); err != nil {
+			lg.Error("close connections", "err", err)
+		}
 	}
 	// A listen error can race the signal; Shutdown has made ListenAndServe return, so this does not block.
 	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {

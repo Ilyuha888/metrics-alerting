@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -83,39 +82,28 @@ func parseParams(args []string) (params, error) {
 		p.rateLimit = n
 	}
 
-	if err := checkPositive(p.reportInterval, "r", "REPORT_INTERVAL", e.ReportInterval); err != nil {
+	if err := checkPositive(int(p.reportInterval/time.Second), "r", "REPORT_INTERVAL", e.ReportInterval); err != nil {
 		return p, err
 	}
-	if err := checkPositive(p.pollInterval, "p", "POLL_INTERVAL", e.PollInterval); err != nil {
+	if err := checkPositive(int(p.pollInterval/time.Second), "p", "POLL_INTERVAL", e.PollInterval); err != nil {
 		return p, err
 	}
-	if err := checkRateLimit(p.rateLimit, e.RateLimit); err != nil {
+	if err := checkPositive(p.rateLimit, "l", "RATE_LIMIT", e.RateLimit); err != nil {
 		return p, err
 	}
 
 	return p, nil
 }
 
-// checkPositive keeps the error text the agent gave when its own seconds type rejected 0,
-// naming the env variable when it set the value and the flag otherwise.
-func checkPositive(d time.Duration, flagName, envName, envValue string) error {
-	if d > 0 {
+// checkPositive keeps the error text the flag package would give, naming the env variable when it
+// set the value and the flag otherwise. n is in the flag's own units, so an interval comes in seconds:
+// config.Seconds holds whole seconds only, and its text is the same strconv.Itoa.
+func checkPositive(n int, flagName, envName, envValue string) error {
+	if n > 0 {
 		return nil
 	}
 	if envValue != "" {
 		return fmt.Errorf("%s: must be greater than 0", envName)
 	}
-	return fmt.Errorf("invalid value %q for flag -%s: must be greater than 0", (*config.Seconds)(&d).String(), flagName)
-}
-
-// checkRateLimit names the env variable when it set the value and the flag otherwise, as
-// checkPositive does.
-func checkRateLimit(n int, envValue string) error {
-	if n > 0 {
-		return nil
-	}
-	if envValue != "" {
-		return errors.New("RATE_LIMIT: must be greater than 0")
-	}
-	return fmt.Errorf("invalid value %q for flag -l: must be greater than 0", strconv.Itoa(n))
+	return fmt.Errorf("invalid value %q for flag -%s: must be greater than 0", strconv.Itoa(n), flagName)
 }
