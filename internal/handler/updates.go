@@ -33,7 +33,7 @@ func (h *handlers) updates(w http.ResponseWriter, r *http.Request) {
 
 	if len(list) > 0 {
 		b := mergeBatch(list)
-		if stamped {
+		if stamped && h.trustStamp(r, stamp) {
 			err = h.stamps.update(r.Context(), h.storage, b, stamp)
 		} else {
 			err = h.storage.UpdateBatch(r.Context(), b)

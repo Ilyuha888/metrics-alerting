@@ -3,8 +3,10 @@ package handler_test
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/Ilyuha888/metrics-alerting/internal/handler"
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/Ilyuha888/metrics-alerting/internal/models"
+	"github.com/Ilyuha888/metrics-alerting/internal/sign"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -181,4 +184,122 @@ func TestRouter_Updates_ConcurrentStampedBatchesDoNotCross(t *testing.T) {
 	require.Len(t, s.batches, 2)
 	assert.Equal(t, batch(map[string]metrics.Gauge{"temp": 2}, nil), s.batches[0])
 	assert.Equal(t, batch(nil, map[string]metrics.Counter{"hits": 1}), s.batches[1])
+}
+
+func TestRouter_Updates_StampIsHonouredOnlyWhenSignedAndNotAhead(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	at := func(d time.Duration) int64 { return now.Add(d).UnixNano() }
+	type post struct {
+		stamp  int64
+		signed bool
+		body   string
+	}
+	tests := []struct {
+		name  string
+		key   []byte
+		posts []post
+		want  []metrics.Batch
+	}{
+		{
+			name: "unsigned max stamp to a keyed server is stored unstamped and a later signed batch overwrites it",
+			key:  testKey,
+			posts: []post{
+				{stamp: math.MaxInt64, body: `[{"id":"temp","type":"gauge","value":1}]`},
+				{stamp: at(0), signed: true, body: `[{"id":"temp","type":"gauge","value":2}]`},
+			},
+			want: []metrics.Batch{
+				batch(map[string]metrics.Gauge{"temp": 1}, nil),
+				batch(map[string]metrics.Gauge{"temp": 2}, nil),
+			},
+		},
+		{
+			name: "unsigned stamp within the limit to a keyed server is stored unstamped and leaves the guard untouched",
+			key:  testKey,
+			posts: []post{
+				{stamp: at(30 * time.Second), body: `[{"id":"temp","type":"gauge","value":1}]`},
+				{stamp: at(0), signed: true, body: `[{"id":"temp","type":"gauge","value":2}]`},
+			},
+			want: []metrics.Batch{
+				batch(map[string]metrics.Gauge{"temp": 1}, nil),
+				batch(map[string]metrics.Gauge{"temp": 2}, nil),
+			},
+		},
+		{
+			name: "signed stamp two minutes ahead is stored unstamped and leaves the guard untouched",
+			key:  testKey,
+			posts: []post{
+				{stamp: at(2 * time.Minute), signed: true, body: `[{"id":"temp","type":"gauge","value":1}]`},
+				{stamp: at(0), signed: true, body: `[{"id":"temp","type":"gauge","value":2}]`},
+			},
+			want: []metrics.Batch{
+				batch(map[string]metrics.Gauge{"temp": 1}, nil),
+				batch(map[string]metrics.Gauge{"temp": 2}, nil),
+			},
+		},
+		{
+			name: "signed stamp 30 seconds ahead is honoured and an older signed batch keeps only its counter",
+			key:  testKey,
+			posts: []post{
+				{stamp: at(30 * time.Second), signed: true, body: `[{"id":"temp","type":"gauge","value":1}]`},
+				{stamp: at(0), signed: true, body: `[{"id":"temp","type":"gauge","value":2},{"id":"hits","type":"counter","delta":1}]`},
+			},
+			want: []metrics.Batch{
+				batch(map[string]metrics.Gauge{"temp": 1}, nil),
+				batch(nil, map[string]metrics.Counter{"hits": 1}),
+			},
+		},
+		{
+			name: "signed stamp exactly one minute ahead is honoured",
+			key:  testKey,
+			posts: []post{
+				{stamp: at(time.Minute), signed: true, body: `[{"id":"temp","type":"gauge","value":1}]`},
+				{stamp: at(0), signed: true, body: `[{"id":"temp","type":"gauge","value":2}]`},
+			},
+			want: []metrics.Batch{
+				batch(map[string]metrics.Gauge{"temp": 1}, nil),
+			},
+		},
+		{
+			name: "server without a key honours an unsigned current stamp",
+			posts: []post{
+				{stamp: at(0), body: `[{"id":"temp","type":"gauge","value":1}]`},
+				{stamp: at(-time.Second), body: `[{"id":"temp","type":"gauge","value":2}]`},
+			},
+			want: []metrics.Batch{
+				batch(map[string]metrics.Gauge{"temp": 1}, nil),
+			},
+		},
+		{
+			name: "server without a key stores a stamp two minutes ahead unstamped",
+			posts: []post{
+				{stamp: at(2 * time.Minute), body: `[{"id":"temp","type":"gauge","value":1}]`},
+				{stamp: at(0), body: `[{"id":"temp","type":"gauge","value":2}]`},
+			},
+			want: []metrics.Batch{
+				batch(map[string]metrics.Gauge{"temp": 1}, nil),
+				batch(map[string]metrics.Gauge{"temp": 2}, nil),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &fakeStorage{}
+			router := handler.NewRouterWithClock(s, nil, discardLogger, tt.key, func() time.Time { return now })
+
+			for i, p := range tt.posts {
+				req := httptest.NewRequest(http.MethodPost, "/updates/", strings.NewReader(p.body))
+				req.Header.Set("Content-Type", jsonType)
+				req.Header.Set(models.TimestampHeader, strconv.FormatInt(p.stamp, 10))
+				if p.signed {
+					req.Header.Set(sign.Header, sign.Sum(tt.key, []byte(p.body)))
+				}
+				w := httptest.NewRecorder()
+
+				router.ServeHTTP(w, req)
+
+				assert.Equal(t, http.StatusOK, w.Code, "post %d", i+1)
+			}
+			assert.Equal(t, tt.want, s.batches)
+		})
+	}
 }

@@ -28,10 +28,11 @@ func TestParseParams(t *testing.T) {
 		},
 		{
 			name: "debug log level",
-			args: []string{"-l", "debug"},
+			args: []string{"-log-level", "debug"},
 			want: params{address: config.DefaultAddress(), logLevel: slog.LevelDebug, storeInterval: 300 * time.Second, filePath: "", restore: true},
 		},
-		{name: "unknown log level", args: []string{"-l", "loud"}, wantErr: `invalid value "loud" for flag -l`},
+		{name: "unknown log level", args: []string{"-log-level", "loud"}, wantErr: `invalid value "loud" for flag -log-level`},
+		{name: "-l is not a server flag", args: []string{"-l", "debug"}, wantErr: "flag provided but not defined: -l"},
 		{
 			name: "number address",
 			args: []string{"-a", "127.0.0.1:1234"},

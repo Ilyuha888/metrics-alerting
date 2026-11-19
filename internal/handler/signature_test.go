@@ -223,3 +223,40 @@ func TestRouter_Signature_AnswerIsSignedAsSent(t *testing.T) {
 		})
 	}
 }
+
+func TestWithSignature_Verified_TrueOnlyAfterAValidSignature(t *testing.T) {
+	body := []byte(signedBatch)
+	tests := []struct {
+		name      string
+		key       []byte
+		method    string
+		signature string
+		want      bool
+	}{
+		{name: "POST with a valid signature", key: testKey, method: http.MethodPost, signature: sign.Sum(testKey, body), want: true},
+		{name: "POST without a signature", key: testKey, method: http.MethodPost},
+		{name: "GET with a valid signature", key: testKey, method: http.MethodGet, signature: sign.Sum(testKey, body)},
+		{name: "empty key, POST with a signature", method: http.MethodPost, signature: sign.Sum(testKey, body)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got, reached bool
+			h := handler.WithSignature(tt.key)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				reached = true
+				got = handler.Verified(r)
+			}))
+			req := httptest.NewRequest(tt.method, "/updates/", bytes.NewReader(body))
+			if tt.signature != "" {
+				req.Header.Set(sign.Header, tt.signature)
+			}
+			rec := httptest.NewRecorder()
+
+			h.ServeHTTP(rec, req)
+
+			res := rec.Result()
+			defer res.Body.Close()
+			require.True(t, reached)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

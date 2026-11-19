@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,6 +46,14 @@ func (sw *signResponseWriter) send(key []byte) {
 	_, _ = sw.w.Write(sw.body.Bytes())
 }
 
+type signedKey struct{}
+
+// verified reports whether WithSignature checked the request's signature and found it valid.
+func verified(r *http.Request) bool {
+	ok, _ := r.Context().Value(signedKey{}).(bool)
+	return ok
+}
+
 // WithSignature checks the raw request body and signs the answer as sent, so it sits outside
 // WithGzip. An empty key turns it off.
 func WithSignature(key []byte) func(http.Handler) http.Handler {
@@ -83,7 +92,7 @@ func WithSignature(key []byte) func(http.Handler) http.Handler {
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
-			h.ServeHTTP(sw, r)
+			h.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), signedKey{}, true)))
 		})
 	}
 }

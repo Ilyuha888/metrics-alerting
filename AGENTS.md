@@ -19,8 +19,8 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
   `TimestampHeader`, the batch stamp both sides use.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default;
   `Seconds`, the bare-seconds interval flag type.
-- `internal/logger/` — `New`, the `log/slog` logger both binaries build from their log-level flag:
-  `-l` on the server, `-log-level` on the agent, whose `-l` is the rate limit.
+- `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-log-level` flag;
+  the agent's `-l` is the rate limit.
 - `internal/retry/` — `Do`, which repeats an operation on a retriable error, and `DefaultDelays`.
 - `internal/storage/memstorage/` — `Storage`, the in-memory `handler.Storage`.
 - `internal/storage/filestore/` — `Storage`, which wraps `memstorage.Storage` and saves it to a JSON file
@@ -162,6 +162,9 @@ it. Under one lock it drops the gauges whose stamp is not newer than the stored 
 
 - No header (the autotests, `/update/`, `POST /update`): stored as before; no check, no stamp recorded.
 - A header that is not a decimal integer: 400, nothing stored.
+- The stamp counts only if the request passed a `HashSHA256` check (on a server with a key) and is at most
+  `maxStampLead`, 1 minute, ahead of the server clock. Otherwise the batch is stored as without the header,
+  and a Warn is logged: an unchecked or far-future stamp would skip every later batch's gauges.
 - Stamps live in the handler's memory only. The storages do not know them, and a restarted server takes
   the first stamped batch as is.
 - The `HashSHA256` signature covers the body, not this header.

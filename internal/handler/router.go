@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/go-chi/chi/v5"
@@ -31,11 +32,17 @@ type handlers struct {
 	db      Pinger
 	log     *slog.Logger
 	stamps  *stampGuard
+	keyed   bool
+	now     func() time.Time
 }
 
 // NewRouter returns the routes; patterns alone answer 404 for a missing name, 405 for a wrong method.
 func NewRouter(s Storage, db Pinger, lg *slog.Logger, key []byte) http.Handler {
-	h := &handlers{storage: s, db: db, log: lg, stamps: newStampGuard()}
+	return newRouter(s, db, lg, key, time.Now)
+}
+
+func newRouter(s Storage, db Pinger, lg *slog.Logger, key []byte, now func() time.Time) http.Handler {
+	h := &handlers{storage: s, db: db, log: lg, stamps: newStampGuard(), keyed: len(key) > 0, now: now}
 
 	r := chi.NewRouter()
 	// Logging goes first, so it also records the 404s, 405s, signature and gzip rejections the rest

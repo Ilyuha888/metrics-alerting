@@ -39,7 +39,7 @@ func parseParams(args []string) (params, error) {
 	p.address = config.DefaultAddress()
 	p.storeInterval = 300 * time.Second
 	fs.Var(&p.address, "a", "Net address host:port")
-	fs.TextVar(&p.logLevel, "l", slog.LevelInfo, "log level")
+	fs.TextVar(&p.logLevel, "log-level", slog.LevelInfo, "log level")
 	fs.Var((*config.Seconds)(&p.storeInterval), "i", "Store interval in seconds, 0 saves on every update")
 	fs.StringVar(&p.filePath, "f", "", "File to store metrics in; empty keeps them in memory only")
 	// A bool flag takes its value only as -r=false; "-r false" ends flag parsing.
