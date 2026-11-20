@@ -15,10 +15,12 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
   so any code used by both lives here.
 - `internal/metrics/` — the shared vocabulary: kinds, value types, `Snapshot`, `Batch`, `ErrNotFound`.
   Both storage and handler import it, so neither has to import the other.
-- `internal/models/` — `Metrics`, the JSON wire format the agent sends and the server reads and answers.
+- `internal/models/` — `Metrics`, the JSON wire format the agent sends and the server reads and answers;
+  `TimestampHeader`, the batch stamp both sides use.
 - `internal/config/` — `NetAddress`, the `host:port` flag type both binaries parse, and its default;
   `Seconds`, the bare-seconds interval flag type.
-- `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-l` flag.
+- `internal/logger/` — `New`, the `log/slog` logger both binaries build from their `-log-level` flag;
+  the agent's `-l` is the rate limit.
 - `internal/retry/` — `Do`, which repeats an operation on a retriable error, and `DefaultDelays`.
 - `internal/storage/memstorage/` — `Storage`, the in-memory `handler.Storage`.
 - `internal/storage/filestore/` — `Storage`, which wraps `memstorage.Storage` and saves it to a JSON file
@@ -26,9 +28,12 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/storage/database/` — `Open`, which returns a pinged `*sql.DB` with the embedded goose
   migrations from `migrations/` applied; `IsRetriable` and `IsConnectionLost`, which classify PostgreSQL errors for `retry.Do`.
 - `internal/storage/pgstore/` — `Storage`, the `handler.Storage` on PostgreSQL, over the pool from `database`.
+- `internal/storage/pgtest/` — test helpers for `database` and `pgstore`: `RefusingDir`, a socket that refuses
+  connections, and `Proxy`, which refuses them until `Start`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
   interfaces it needs, and passes the request's context to both.
-- `internal/agent/` — collector, sender and the polling loop, which runs until its context is done.
+- `internal/agent/` — `Collector` (runtime), `SystemCollector` (gopsutil: memory and CPU load), `Sender`,
+  and `Agent`: two pollers, a reporter and `RateLimit` workers that send, all running until the context is done.
 
 Do not create a directory before something goes in it. Git does not track empty
 directories, and an empty package is noise.
@@ -128,27 +133,66 @@ so a second run of an update that landed would count twice, and which failures r
 
 ## Stopping the agent
 
+The agent runs four kinds of goroutine: a runtime poller and a system poller, each on `pollInterval`; a reporter
+on its own `reportInterval` ticker, which takes one snapshot and hands it to a worker over an unbuffered channel;
+and `RateLimit` workers, each sending one snapshot at a time. While every worker is busy, the reporter waits and
+its ticker drops the ticks it misses. A snapshot takes the PollCount delta from the collector; a failed send
+puts it back with `Restore`, so no poll is in two snapshots at once, however many sends are in flight.
+
 SIGINT or SIGTERM cancels the context `Run` got from `main`. The signal interrupts pauses only: a request
 in flight waits for its answer, up to the client's 5 s timeout, since a cut request may have landed and a
 repeat would count `PollCount` twice.
 
-- Signal outside a send, or during a send that succeeded: one last report goes out, without `Reported`, on
-  its own context of 5 s. That context stops only its pauses, so a request started at 4 s can hold it to 9 s.
-- Signal during a send that ends in an error: no last report, and the polls since the last report are lost.
+- The pollers and the reporter stop. A snapshot the reporter held for a worker goes back to the collector. The
+  reporter closes the channel, and `Run` waits until every worker has finished its send.
+- No send in flight at the signal ended in an error: one last report goes out with everything left, restored
+  deltas included, on its own context of 5 s. That context stops only its pauses, so a request started at 4 s
+  can hold it to 9 s.
+- A send in flight at the signal ended in an error: no last report, and the polls not yet delivered are lost.
 - A pause the signal cut is not logged as a `send metrics` error. A real failure is.
 - Then `agent stopped` at Info, `Run` returns, the process exits 0.
 
-## Known debt
+## Stopping the server
 
-- The server does not save on SIGINT or SIGTERM, so metrics newer than the last save are
-  lost when it stops. Saving on shutdown needs signal handling and a graceful
-  `Shutdown`, which wait for the sprint on goroutines.
-- The agent reports on every Nth poll, where N is `reportInterval / pollInterval` rounded
-  down, so intervals that do not divide evenly report early: `-p 3 -r 10` reports every
-  9 seconds. Exact timing needs a separate reporting timer, which waits for the sprint on
-  goroutines.
-- The agent does not poll during the pauses between send attempts, up to 9 seconds, because one
-  goroutine does both jobs. Polling through them waits for the sprint on goroutines.
+SIGINT or SIGTERM cancels the context `run` builds with `signal.NotifyContext`. A second signal after that
+kills the process at once, with no last save.
+
+- `http.Server.Shutdown` stops accepting connections and waits for the requests in flight, up to
+  `shutdownTimeout`, 10 s. Past it the error is logged and `Close` cuts the connections left.
+- `SaveEvery` stops on the same context and makes no save of its own; `run` waits for it to return, so
+  two saves never overlap.
+- With file storage, one last `Save`, whatever `-i` is: it comes after every write Shutdown waited for. If
+  it fails, `run` returns the error and the process exits 1.
+- With a database, the pool closes when `run` returns, after Shutdown.
+- Then `server stopped` at Info and exit 0. A listen error (a port in use) still ends `run` at once with
+  that error and exit 1.
+- A signal while `database.Open` is still retrying at start ends it: `stopped during startup` at Info with
+  the error, exit 0.
+
+## Batch order
+
+Several workers send at once, so batches can reach the server out of order. The reporter stamps each
+snapshot with the time it took it, and `Sender` puts that time in `X-Metrics-Timestamp` as Unix
+nanoseconds, the same value on every attempt. A zero time sends no header.
+
+On `POST /updates/` the handler sets `metrics.Batch.Stamp` to the trusted stamp, 0 for none, and the storage
+orders the gauges by it. Each storage keeps, per gauge, the stamp of the batch that last wrote it, and writes
+a gauge only if the batch's stamp is newer, in the same step as the write: `memstorage` under its mutex, in a
+map; `filestore` through `memstorage`, and in its JSON file as `stamp` on each stamped gauge; `pgstore` in the
+`stamp` column of `gauges`, checked by the upsert's `WHERE` on the locked row. Counters are always added.
+
+- No stamp (no header, a header of `0`, an untrusted stamp; `/update/` and `POST /update`): the gauges are
+  written and the stored stamp stays, so an older stamped batch is still skipped after them.
+- A header that is not a decimal integer: 400 with the parse error in the body, nothing stored.
+- On a server with a key, a stamp counts only if the request passed the `HashSHA256` check; an unsigned one
+  is stored as without the header, since a forged stamp would skip later batches' gauges.
+- A stamp more than `maxStampLead`, 1 minute, ahead of the server clock is clamped to now plus 1 minute: an
+  agent whose clock runs ahead keeps its order, and a forged stamp holds a gauge for at most a minute.
+- Both cases log on change, not per batch: a Warn when unsigned stamps or clamping start, an Info when a
+  signed or in-limit stamp arrives after them. The state is server-wide, since a request names no agent.
+- Stamps outlive a restart with a file (restored with `-r`) or a database. A file written before stamps
+  restores with none, and its gauges take the first stamped batch.
+- The `HashSHA256` signature covers the body, not this header.
 
 ## Updating the template
 

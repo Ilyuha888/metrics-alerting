@@ -1,4 +1,5 @@
-// External test package: everything goes through NewRouter, as for a real caller.
+// External test package: tests go through the router, as a real caller does; export_test.go only adds
+// a fixed clock and a look at the signature mark.
 package handler_test
 
 import (

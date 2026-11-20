@@ -9,17 +9,16 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"os"
 	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/Ilyuha888/metrics-alerting/internal/storage/pgtest"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
@@ -94,16 +93,38 @@ func TestMigrations_UpDownUp_LeavesTables(t *testing.T) {
 	provider, err := newProvider(db)
 	require.NoError(t, err)
 
-	_, err = provider.Down(t.Context())
+	_, err = provider.DownTo(t.Context(), 0)
 	require.NoError(t, err)
 	assert.False(t, tableExists(t, db, "gauges"))
 	assert.False(t, tableExists(t, db, "counters"))
 
 	results, err := provider.Up(t.Context())
 	require.NoError(t, err)
-	assert.Len(t, results, 1)
+	assert.Len(t, results, 2)
 	assert.True(t, tableExists(t, db, "gauges"))
 	assert.True(t, tableExists(t, db, "counters"))
+}
+
+// A database the previous server migrated already holds gauges; the stamp column must add to it, not
+// require an empty table, and the old rows must read as unstamped.
+func TestMigrations_StampOnADatabaseFromBeforeIt_KeepsOldRowsUnstamped(t *testing.T) {
+	db := plainDatabase(t)
+	provider, err := newProvider(db)
+	require.NoError(t, err)
+	_, err = provider.UpTo(t.Context(), 1)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO gauges (name, value) VALUES ('temp', 36.6)`)
+	require.NoError(t, err)
+
+	results, err := provider.Up(t.Context())
+
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	var value float64
+	var stamp sql.NullInt64
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT value, stamp FROM gauges WHERE name = 'temp'`).Scan(&value, &stamp))
+	assert.Equal(t, 36.6, value)
+	assert.False(t, stamp.Valid)
 }
 
 func openerGoroutines() int {
@@ -112,13 +133,10 @@ func openerGoroutines() int {
 	return strings.Count(string(buf), "database/sql.(*DB).connectionOpener")
 }
 
-func closedPort(t *testing.T) string {
+// refusedDSN points at a socket that refuses every connection.
+func refusedDSN(t *testing.T, password string) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-	return addr
+	return pgtest.DSN(t, fmt.Sprintf("postgres://u:%s@/x", password), pgtest.RefusingDir(t))
 }
 
 // silentPort accepts connections and never answers, as a stuck database does.
@@ -148,8 +166,8 @@ func TestOpen_UnusableDatabase_ReturnsErrorInTimeAndLeavesNoPool(t *testing.T) {
 		name string
 		dsn  func(t *testing.T) string
 	}{
-		{name: "closed port", dsn: func(t *testing.T) string {
-			return fmt.Sprintf("postgres://u:secretpw@%s/x?sslmode=disable", closedPort(t))
+		{name: "refused connection", dsn: func(t *testing.T) string {
+			return refusedDSN(t, "secretpw")
 		}},
 		{name: "server that never answers", dsn: func(t *testing.T) string {
 			return fmt.Sprintf("postgres://u:secretpw@%s/x?sslmode=disable", silentPort(t))
@@ -190,96 +208,6 @@ func TestOpen_UnusableDatabase_ReturnsErrorInTimeAndLeavesNoPool(t *testing.T) {
 	}
 }
 
-// proxy forwards a port to the real database once opened. Until then nothing listens there, so the
-// driver sees a real refused connection without the container being stopped.
-type proxy struct {
-	t           *testing.T
-	addr        string
-	target      string
-	connections atomic.Int32
-
-	mu       sync.Mutex
-	closed   bool
-	listener net.Listener
-	conns    []net.Conn
-}
-
-func newProxy(t *testing.T, target string) *proxy {
-	t.Helper()
-	p := &proxy{t: t, addr: closedPort(t), target: target}
-	t.Cleanup(p.close)
-	return p
-}
-
-func (p *proxy) open() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return
-	}
-	l, err := net.Listen("tcp", p.addr)
-	if !assert.NoError(p.t, err) {
-		return
-	}
-	p.listener = l
-	go p.serve(l)
-}
-
-func (p *proxy) openAfter(d time.Duration) {
-	timer := time.AfterFunc(d, p.open)
-	p.t.Cleanup(func() { timer.Stop() })
-}
-
-func (p *proxy) serve(l net.Listener) {
-	for {
-		client, err := l.Accept()
-		if err != nil {
-			return
-		}
-		p.connections.Add(1)
-		server, err := net.Dial("tcp", p.target)
-		if !assert.NoError(p.t, err) {
-			client.Close()
-			return
-		}
-		p.mu.Lock()
-		p.conns = append(p.conns, client, server)
-		p.mu.Unlock()
-		go forward(client, server)
-		go forward(server, client)
-	}
-}
-
-func forward(to, from net.Conn) {
-	io.Copy(to, from)
-	to.Close()
-	from.Close()
-}
-
-func (p *proxy) close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.closed = true
-	if p.listener != nil {
-		p.listener.Close()
-	}
-	for _, c := range p.conns {
-		c.Close()
-	}
-}
-
-// through returns dsn pointed at the proxy. TLS stays off, so one attempt is one connection.
-func (p *proxy) through(t *testing.T, dsn string) string {
-	t.Helper()
-	u, err := url.Parse(dsn)
-	require.NoError(t, err)
-	u.Host = p.addr
-	q := u.Query()
-	q.Set("sslmode", "disable")
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 func hostOf(t *testing.T, dsn string) string {
 	t.Helper()
 	u, err := url.Parse(dsn)
@@ -290,11 +218,11 @@ func hostOf(t *testing.T, dsn string) string {
 func TestOpen_DatabaseComingUpDuringAPause_Succeeds(t *testing.T) {
 	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
 	dsn := newDatabaseDSN(t)
-	p := newProxy(t, hostOf(t, dsn))
-	p.openAfter(opensAfter)
+	p := pgtest.NewProxy(t, hostOf(t, dsn))
+	p.StartAfter(opensAfter)
 	start := time.Now()
 
-	db, err := open(t.Context(), p.through(t, dsn), []time.Duration{pause})
+	db, err := open(t.Context(), p.DSN(dsn), []time.Duration{pause})
 
 	require.NoError(t, err)
 	defer db.Close()
@@ -302,11 +230,11 @@ func TestOpen_DatabaseComingUpDuringAPause_Succeeds(t *testing.T) {
 	assert.True(t, tableExists(t, db, "gauges"))
 }
 
-func TestOpen_ClosedPort_ErrorsAfterEveryAttempt(t *testing.T) {
+func TestOpen_RefusedConnection_ErrorsAfterEveryAttempt(t *testing.T) {
 	delays := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 30 * time.Millisecond}
 	start := time.Now()
 
-	db, err := open(t.Context(), fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)), delays)
+	db, err := open(t.Context(), refusedDSN(t, "p"), delays)
 
 	assert.Nil(t, db)
 	var connectErr *pgconn.ConnectError
@@ -315,13 +243,13 @@ func TestOpen_ClosedPort_ErrorsAfterEveryAttempt(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), 60*time.Millisecond)
 }
 
-func TestOpen_ClosedPort_StopsAtTheContextBound(t *testing.T) {
+func TestOpen_RefusedConnection_StopsAtTheContextBound(t *testing.T) {
 	const timeout = 300 * time.Millisecond
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	start := time.Now()
 
-	db, err := Open(ctx, fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)))
+	db, err := Open(ctx, refusedDSN(t, "p"))
 
 	assert.Nil(t, db)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
@@ -335,9 +263,9 @@ const retryPauseBelow = 900 * time.Millisecond
 
 func TestOpen_WrongPassword_FailsWithoutRepeats(t *testing.T) {
 	dsn := newDatabaseDSN(t)
-	p := newProxy(t, hostOf(t, dsn))
-	p.open()
-	u, err := url.Parse(p.through(t, dsn))
+	p := pgtest.NewProxy(t, hostOf(t, dsn))
+	p.Start()
+	u, err := url.Parse(p.DSN(dsn))
 	require.NoError(t, err)
 	u.User = url.UserPassword(u.User.Username(), "wrong")
 
@@ -347,7 +275,7 @@ func TestOpen_WrongPassword_FailsWithoutRepeats(t *testing.T) {
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, pgerrcode.InvalidPassword, pgErr.Code)
-	assert.EqualValues(t, 1, p.connections.Load())
+	assert.Equal(t, 1, p.Connections())
 }
 
 // plainDatabase opens a throwaway database with no migrations, for failures any table can produce.
@@ -457,10 +385,11 @@ func TestIsRetriable_RealFailures_OnlyAnUnsentStatementRepeats(t *testing.T) {
 		{
 			name: "refused connection",
 			err: func(t *testing.T) error {
-				return pingError(t, fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)), time.Second)
+				return pingError(t, refusedDSN(t, "p"), time.Second)
 			},
 			wantConnectErr: true,
 			wantRetriable:  true,
+			wantIsErr:      syscall.ECONNREFUSED,
 		},
 		{
 			name: "connect that times out sent no statement",
@@ -622,9 +551,10 @@ func TestIsConnectionLost_RealFailures_OnlyALostConnectionCounts(t *testing.T) {
 		{
 			name: "refused connection",
 			err: func(t *testing.T) error {
-				err := pingError(t, fmt.Sprintf("postgres://u:p@%s/x?sslmode=disable", closedPort(t)), time.Second)
+				err := pingError(t, refusedDSN(t, "p"), time.Second)
 				var connectErr *pgconn.ConnectError
 				require.ErrorAs(t, err, &connectErr)
+				require.ErrorIs(t, err, syscall.ECONNREFUSED)
 				return err
 			},
 		},

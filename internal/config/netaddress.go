@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
 )
 
@@ -13,6 +14,10 @@ type NetAddress struct {
 
 func (adr *NetAddress) String() string {
 	return net.JoinHostPort(adr.Host, strconv.Itoa(adr.Port))
+}
+
+func (adr *NetAddress) URL(scheme string) string {
+	return (&url.URL{Scheme: scheme, Host: adr.String()}).String()
 }
 
 func (adr *NetAddress) Set(flagValue string) error {

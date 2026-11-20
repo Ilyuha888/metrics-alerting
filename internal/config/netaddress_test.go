@@ -63,3 +63,25 @@ func TestNetAddress_String(t *testing.T) {
 		})
 	}
 }
+
+func TestNetAddress_URL_ReturnsSchemeAndAddress(t *testing.T) {
+	tests := []struct {
+		name      string
+		flagValue string
+		scheme    string
+		want      string
+	}{
+		{name: "host and port", flagValue: "example.com:60", scheme: "http", want: "http://example.com:60"},
+		{name: "other scheme", flagValue: "localhost:8080", scheme: "https", want: "https://localhost:8080"},
+		{name: "port only", flagValue: ":8080", scheme: "http", want: "http://:8080"},
+		{name: "IPv6 host keeps its brackets", flagValue: "[::1]:8080", scheme: "http", want: "http://[::1]:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adr := config.DefaultAddress()
+			require.NoError(t, adr.Set(tt.flagValue))
+
+			assert.Equal(t, tt.want, adr.URL(tt.scheme))
+		})
+	}
+}

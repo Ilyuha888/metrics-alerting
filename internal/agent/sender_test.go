@@ -1,24 +1,29 @@
 package agent
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/Ilyuha888/metrics-alerting/internal/models"
 	"github.com/Ilyuha888/metrics-alerting/internal/retry"
+	"github.com/Ilyuha888/metrics-alerting/internal/sign"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,6 +33,8 @@ type recorded struct {
 	path            string
 	contentType     string
 	contentEncoding string
+	signature       string
+	raw             []byte
 	body            []byte
 }
 
@@ -40,12 +47,14 @@ type recorder struct {
 
 func (rec *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A body that is not gzip stays empty, so decodeBody fails the test that reads it.
+	raw, _ := io.ReadAll(r.Body)
 	var body []byte
-	if zr, err := gzip.NewReader(r.Body); err == nil {
+	if zr, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
 		body, _ = io.ReadAll(zr)
 	}
 	rec.got = append(rec.got, recorded{
-		r.Method, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Content-Encoding"), body,
+		r.Method, r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Content-Encoding"),
+		r.Header.Get(sign.Header), raw, body,
 	})
 	w.WriteHeader(rec.status)
 }
@@ -58,7 +67,7 @@ func recordingServer(t *testing.T, status int) (*Sender, *recorder) {
 	srv := httptest.NewServer(rec)
 	t.Cleanup(srv.Close)
 
-	return NewSender(srv.URL), rec
+	return NewSender(srv.URL, nil), rec
 }
 
 func decodeBody(t *testing.T, body []byte) []models.Metrics {
@@ -202,7 +211,7 @@ func TestSender_Send_LargeErrorAnswerKeepsTheConnection(t *testing.T) {
 	}
 	srv.Start()
 	t.Cleanup(srv.Close)
-	sender := NewSender(srv.URL)
+	sender := NewSender(srv.URL, nil)
 
 	require.Error(t, sender.Send(t.Context(), Snapshot{PollCount: 1}))
 	require.Error(t, sender.Send(t.Context(), Snapshot{PollCount: 1}))
@@ -221,60 +230,29 @@ func TestSender_Send_UnreachableServerIsAnError(t *testing.T) {
 	assert.Empty(t, rec.got)
 }
 
-func closedPort(t *testing.T) string {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-	return addr
-}
+// unreachable is never dialled: refuseDials(sender, everyDial) refuses before any lookup.
+const unreachable, everyDial = "http://metrics.invalid", math.MaxInt32
 
-// countDials counts every dial the sender makes. It dials for real, so a closed port still refuses.
-func countDials(sender *Sender) *atomic.Int32 {
+// refuseDials refuses the sender's first n dials without the network and makes the rest for real; it
+// counts every dial. A released port can be taken by another process before the dial and answer it.
+func refuseDials(sender *Sender, n int32) *atomic.Int32 {
 	dials := new(atomic.Int32)
 	dialer := &net.Dialer{}
 	sender.client.Transport = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dials.Add(1)
+			if dials.Add(1) <= n {
+				return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+			}
 			return dialer.DialContext(ctx, network, addr)
 		},
 	}
 	return dials
 }
 
-// serveAfter starts h on addr after d. The first dial has d to be refused, far more than a refusal
-// on loopback takes.
-func serveAfter(t *testing.T, addr string, d time.Duration, h http.Handler) {
-	t.Helper()
-	started := make(chan *httptest.Server, 1)
-	time.AfterFunc(d, func() {
-		srv := httptest.NewUnstartedServer(h)
-		srv.Listener.Close()
-		l, err := net.Listen("tcp", addr)
-		if !assert.NoError(t, err) {
-			started <- nil
-			return
-		}
-		srv.Listener = l
-		srv.Start()
-		started <- srv
-	})
-	t.Cleanup(func() {
-		if srv := <-started; srv != nil {
-			srv.Close()
-		}
-	})
-}
-
 func TestSender_Send_ServerComingUpDuringAPauseGetsTheWholeBody(t *testing.T) {
-	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
-	addr := closedPort(t)
-	sender := NewSender("http://" + addr)
-	sender.SetDelays([]time.Duration{pause})
-	dials := countDials(sender)
-	rec := &recorder{status: http.StatusOK}
-	serveAfter(t, addr, opensAfter, rec)
+	sender, rec := recordingServer(t, http.StatusOK)
+	sender.SetDelays([]time.Duration{time.Millisecond})
+	dials := refuseDials(sender, 1)
 
 	err := sender.Send(t.Context(), Snapshot{Gauges: map[string]metrics.Gauge{"a": 1.5, "b": 2.5}, PollCount: 3})
 
@@ -289,10 +267,10 @@ func TestSender_Send_ServerComingUpDuringAPauseGetsTheWholeBody(t *testing.T) {
 	}, decodeBody(t, rec.got[0].body))
 }
 
-func TestSender_Send_ClosedPortDialsFourTimes(t *testing.T) {
-	sender := NewSender("http://" + closedPort(t))
+func TestSender_Send_RefusedDialDialsFourTimes(t *testing.T) {
+	sender := NewSender(unreachable, nil)
 	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
-	dials := countDials(sender)
+	dials := refuseDials(sender, everyDial)
 
 	err := sender.Send(t.Context(), Snapshot{PollCount: 1})
 
@@ -304,7 +282,7 @@ func TestSender_Send_ClosedPortDialsFourTimes(t *testing.T) {
 }
 
 func TestNewSender_RepeatsWithTheDefaultDelays(t *testing.T) {
-	assert.Equal(t, retry.DefaultDelays, NewSender("http://localhost").delays)
+	assert.Equal(t, retry.DefaultDelays, NewSender("http://localhost", nil).delays)
 }
 
 func TestSender_Send_FailureAfterTheRequestWentOutIsNotRepeated(t *testing.T) {
@@ -352,7 +330,7 @@ func TestSender_Send_FailureAfterTheRequestWentOutIsNotRepeated(t *testing.T) {
 				tt.handler(w, r)
 			}))
 			defer srv.Close()
-			sender := NewSender(srv.URL)
+			sender := NewSender(srv.URL, nil)
 			sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
 			if tt.timeout > 0 {
 				sender.client.Timeout = tt.timeout
@@ -373,9 +351,9 @@ func TestSender_Send_FailureAfterTheRequestWentOutIsNotRepeated(t *testing.T) {
 }
 
 func TestSender_Send_CancelDuringAPauseReturnsAtOnce(t *testing.T) {
-	sender := NewSender("http://" + closedPort(t))
+	sender := NewSender(unreachable, nil)
 	sender.SetDelays([]time.Duration{time.Hour, time.Hour})
-	dials := countDials(sender)
+	dials := refuseDials(sender, everyDial)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	result := make(chan error, 1)
@@ -411,7 +389,7 @@ func TestSender_Send_CancelWhileTheServerHoldsItsAnswerWaitsForIt(t *testing.T) 
 	t.Cleanup(srv.Close)
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseOnce)
-	sender := NewSender(srv.URL)
+	sender := NewSender(srv.URL, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	result := make(chan error, 1)
@@ -429,4 +407,97 @@ func TestSender_Send_CancelWhileTheServerHoldsItsAnswerWaitsForIt(t *testing.T) 
 
 	assert.NoError(t, <-result)
 	assert.EqualValues(t, 1, requests.Load())
+}
+
+func TestSender_Send_SignsTheGzipBodyOnlyWithAKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    []byte
+		signed bool
+	}{
+		{name: "key signs the body as received", key: []byte("secret"), signed: true},
+		{name: "nil key sends no header", key: nil},
+		{name: "empty key sends no header", key: []byte{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recorder{status: http.StatusOK}
+			srv := httptest.NewServer(rec)
+			t.Cleanup(srv.Close)
+			sender := NewSender(srv.URL, tt.key)
+
+			require.NoError(t, sender.Send(t.Context(), Snapshot{Gauges: map[string]metrics.Gauge{"a": 1}, PollCount: 2}))
+
+			require.Len(t, rec.got, 1)
+			require.NotEmpty(t, rec.got[0].body)
+			if !tt.signed {
+				assert.Empty(t, rec.got[0].signature)
+				return
+			}
+			assert.Equal(t, sign.Sum(tt.key, rec.got[0].raw), rec.got[0].signature)
+		})
+	}
+}
+
+type headerRecorder struct {
+	next    http.RoundTripper
+	name    string
+	headers []string
+}
+
+func (h *headerRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	h.headers = append(h.headers, req.Header.Get(h.name))
+	return h.next.RoundTrip(req)
+}
+
+func TestSender_Send_RepeatAfterADialFailureCarriesTheSameSignature(t *testing.T) {
+	key := []byte("secret")
+	rec := &recorder{status: http.StatusOK}
+	srv := httptest.NewServer(rec)
+	t.Cleanup(srv.Close)
+	sender := NewSender(srv.URL, key)
+	sender.SetDelays([]time.Duration{time.Millisecond})
+	refuseDials(sender, 1)
+	attempts := &headerRecorder{next: sender.client.Transport, name: sign.Header}
+	sender.client.Transport = attempts
+
+	require.NoError(t, sender.Send(t.Context(), Snapshot{PollCount: 1}))
+
+	require.Len(t, rec.got, 1)
+	want := sign.Sum(key, rec.got[0].raw)
+	assert.Equal(t, []string{want, want}, attempts.headers)
+}
+
+func TestSender_Send_StampsTheBatchOnlyWithATime(t *testing.T) {
+	tests := []struct {
+		name  string
+		taken time.Time
+		want  string
+	}{
+		{name: "time sends Unix nanoseconds", taken: time.Unix(1_700_000_000, 123), want: "1700000000000000123"},
+		{name: "zero time sends no header", taken: time.Time{}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sender, _ := recordingServer(t, http.StatusOK)
+			attempts := &headerRecorder{next: &http.Transport{}, name: models.TimestampHeader}
+			sender.client.Transport = attempts
+
+			require.NoError(t, sender.Send(t.Context(), Snapshot{PollCount: 1, Taken: tt.taken}))
+
+			assert.Equal(t, []string{tt.want}, attempts.headers)
+		})
+	}
+}
+
+func TestSender_Send_RepeatAfterADialFailureCarriesTheSameStamp(t *testing.T) {
+	sender, _ := recordingServer(t, http.StatusOK)
+	sender.SetDelays([]time.Duration{time.Millisecond})
+	refuseDials(sender, 1)
+	attempts := &headerRecorder{next: sender.client.Transport, name: models.TimestampHeader}
+	sender.client.Transport = attempts
+
+	require.NoError(t, sender.Send(t.Context(), Snapshot{PollCount: 1, Taken: time.Unix(0, 42)}))
+
+	assert.Equal(t, []string{"42", "42"}, attempts.headers)
 }

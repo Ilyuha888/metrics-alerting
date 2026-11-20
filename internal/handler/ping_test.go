@@ -28,7 +28,7 @@ func (f *fakePinger) PingContext(ctx context.Context) error {
 }
 
 func getPing(db handler.Pinger, lg *slog.Logger) *httptest.ResponseRecorder {
-	router := handler.NewRouter(&fakeStorage{}, db, lg)
+	router := handler.NewRouter(&fakeStorage{}, db, lg, nil)
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
 	w := httptest.NewRecorder()
 
@@ -80,7 +80,7 @@ func TestRouter_Ping_ContextHasDeadline(t *testing.T) {
 
 func TestRouter_Ping_ContextComesFromRequest(t *testing.T) {
 	fake := &fakePinger{}
-	router := handler.NewRouter(&fakeStorage{}, fake, discardLogger)
+	router := handler.NewRouter(&fakeStorage{}, fake, discardLogger, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil).WithContext(ctx)

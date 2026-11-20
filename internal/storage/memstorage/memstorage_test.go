@@ -3,6 +3,7 @@ package memstorage
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"testing"
 
@@ -296,4 +297,130 @@ func TestStorage_UpdateBatch_SnapshotSeesAllOfABatchOrNone(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+type write func(t *testing.T, s *Storage)
+
+func stamped(stamp int64, gauges map[string]metrics.Gauge, counters map[string]metrics.Counter) write {
+	return func(t *testing.T, s *Storage) {
+		require.NoError(t, s.UpdateBatch(t.Context(), metrics.Batch{Gauges: gauges, Counters: counters, Stamp: stamp}))
+	}
+}
+
+func setGauge(name string, v metrics.Gauge) write {
+	return func(t *testing.T, s *Storage) {
+		require.NoError(t, s.SetGauge(t.Context(), name, v))
+	}
+}
+
+func TestStorage_UpdateBatch_StampedGaugeKeepsTheNewest(t *testing.T) {
+	tests := []struct {
+		name       string
+		writes     []write
+		wantGauges map[string]metrics.Gauge
+		wantHits   metrics.Counter
+		wantStamps map[string]int64
+	}{
+		{
+			name:       "newer stamp replaces the gauge",
+			writes:     []write{stamped(100, map[string]metrics.Gauge{"temp": 1}, nil), stamped(200, map[string]metrics.Gauge{"temp": 2}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name: "older stamp skips the gauge, adds the counter and writes a gauge it is first for",
+			writes: []write{
+				stamped(200, map[string]metrics.Gauge{"temp": 2}, map[string]metrics.Counter{"hits": 1}),
+				stamped(100, map[string]metrics.Gauge{"temp": 1, "fresh": 5}, map[string]metrics.Counter{"hits": 1}),
+			},
+			wantGauges: map[string]metrics.Gauge{"temp": 2, "fresh": 5},
+			wantHits:   2,
+			wantStamps: map[string]int64{"temp": 200, "fresh": 100},
+		},
+		{
+			name:       "equal stamp skips the gauge",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), stamped(200, map[string]metrics.Gauge{"temp": 3}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "stamped batch writes a gauge only ever written unstamped",
+			writes:     []write{stamped(0, map[string]metrics.Gauge{"temp": 9}, nil), setGauge("temp", 8), stamped(1, map[string]metrics.Gauge{"temp": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 1},
+			wantStamps: map[string]int64{"temp": 1},
+		},
+		{
+			name: "unstamped batch writes the value and keeps the stamp, so an older stamped one is still skipped",
+			writes: []write{
+				stamped(200, map[string]metrics.Gauge{"temp": 2}, nil),
+				stamped(0, map[string]metrics.Gauge{"temp": 7}, map[string]metrics.Counter{"hits": 1}),
+				stamped(100, map[string]metrics.Gauge{"temp": 1}, nil),
+			},
+			wantGauges: map[string]metrics.Gauge{"temp": 7},
+			wantHits:   1,
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "SetGauge writes the value and keeps the stamp",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), setGauge("temp", 7), stamped(100, map[string]metrics.Gauge{"temp": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 7},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "stamps are per gauge",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), stamped(100, map[string]metrics.Gauge{"load": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2, "load": 1},
+			wantStamps: map[string]int64{"temp": 200, "load": 100},
+		},
+		{
+			name:       "older stamp of stale gauges only changes nothing",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), stamped(100, map[string]metrics.Gauge{"temp": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New()
+
+			for _, w := range tt.writes {
+				w(t, s)
+			}
+
+			snap, stamps := s.SnapshotWithStamps()
+			wantCounters := map[string]metrics.Counter{}
+			if tt.wantHits != 0 {
+				wantCounters["hits"] = tt.wantHits
+			}
+			assert.Equal(t, metrics.Snapshot{Gauges: tt.wantGauges, Counters: wantCounters}, snap)
+			assert.Equal(t, tt.wantStamps, stamps)
+		})
+	}
+}
+
+// Batches race with stamps in random order; a check made outside the lock would let an older one win.
+func TestStorage_UpdateBatch_ConcurrentStampedBatchesKeepTheNewest(t *testing.T) {
+	const batches = 1000
+	s := New()
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, n := range rand.Perm(batches) {
+		wg.Go(func() {
+			<-start
+			stamp := int64(n + 1)
+			assert.NoError(t, s.UpdateBatch(t.Context(), metrics.Batch{
+				Gauges:   map[string]metrics.Gauge{"temp": metrics.Gauge(stamp)},
+				Counters: map[string]metrics.Counter{"hits": 1},
+				Stamp:    stamp,
+			}))
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, metrics.Snapshot{
+		Gauges:   map[string]metrics.Gauge{"temp": batches},
+		Counters: map[string]metrics.Counter{"hits": batches},
+	}, snapshot(t, s))
 }

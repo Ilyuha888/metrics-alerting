@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	mathrand "math/rand/v2"
 	"net/url"
 	"os"
 	"strings"
@@ -481,4 +482,178 @@ func TestStorage_UpdateBatch_ParallelBatchesOverOneSetOfNamesAllLand(t *testing.
 	for _, name := range all {
 		assert.Equal(t, metrics.Counter(writers*batches), snap.Counters[name], name)
 	}
+}
+
+type write func(t *testing.T, s *pgstore.Storage)
+
+func stamped(stamp int64, gauges map[string]metrics.Gauge, counters map[string]metrics.Counter) write {
+	return func(t *testing.T, s *pgstore.Storage) {
+		require.NoError(t, s.UpdateBatch(t.Context(), metrics.Batch{Gauges: gauges, Counters: counters, Stamp: stamp}))
+	}
+}
+
+func setGauge(name string, v metrics.Gauge) write {
+	return func(t *testing.T, s *pgstore.Storage) {
+		require.NoError(t, s.SetGauge(t.Context(), name, v))
+	}
+}
+
+func storedStamps(t *testing.T, db *sql.DB) map[string]int64 {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(), `SELECT name, stamp FROM gauges WHERE stamp IS NOT NULL`)
+	require.NoError(t, err)
+	defer rows.Close()
+	stamps := map[string]int64{}
+	for rows.Next() {
+		var name string
+		var stamp int64
+		require.NoError(t, rows.Scan(&name, &stamp))
+		stamps[name] = stamp
+	}
+	require.NoError(t, rows.Err())
+	return stamps
+}
+
+func TestStorage_UpdateBatch_StampedGaugeKeepsTheNewest(t *testing.T) {
+	tests := []struct {
+		name       string
+		writes     []write
+		wantGauges map[string]metrics.Gauge
+		wantHits   metrics.Counter
+		wantStamps map[string]int64
+	}{
+		{
+			name:       "newer stamp replaces the gauge",
+			writes:     []write{stamped(100, map[string]metrics.Gauge{"temp": 1}, nil), stamped(200, map[string]metrics.Gauge{"temp": 2}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name: "older stamp skips the gauge, adds the counter and writes a gauge it is first for",
+			writes: []write{
+				stamped(200, map[string]metrics.Gauge{"temp": 2}, map[string]metrics.Counter{"hits": 1}),
+				stamped(100, map[string]metrics.Gauge{"temp": 1, "fresh": 5}, map[string]metrics.Counter{"hits": 1}),
+			},
+			wantGauges: map[string]metrics.Gauge{"temp": 2, "fresh": 5},
+			wantHits:   2,
+			wantStamps: map[string]int64{"temp": 200, "fresh": 100},
+		},
+		{
+			name:       "equal stamp skips the gauge",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), stamped(200, map[string]metrics.Gauge{"temp": 3}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "stamped batch writes a gauge only ever written unstamped",
+			writes:     []write{stamped(0, map[string]metrics.Gauge{"temp": 9}, nil), setGauge("temp", 8), stamped(1, map[string]metrics.Gauge{"temp": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 1},
+			wantStamps: map[string]int64{"temp": 1},
+		},
+		{
+			name: "unstamped batch writes the value and keeps the stamp, so an older stamped one is still skipped",
+			writes: []write{
+				stamped(200, map[string]metrics.Gauge{"temp": 2}, nil),
+				stamped(0, map[string]metrics.Gauge{"temp": 7}, map[string]metrics.Counter{"hits": 1}),
+				stamped(100, map[string]metrics.Gauge{"temp": 1}, nil),
+			},
+			wantGauges: map[string]metrics.Gauge{"temp": 7},
+			wantHits:   1,
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "SetGauge writes the value and keeps the stamp",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), setGauge("temp", 7), stamped(100, map[string]metrics.Gauge{"temp": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 7},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "stamps are per gauge",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), stamped(100, map[string]metrics.Gauge{"load": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2, "load": 1},
+			wantStamps: map[string]int64{"temp": 200, "load": 100},
+		},
+		{
+			name:       "older stamp of stale gauges only changes nothing",
+			writes:     []write{stamped(200, map[string]metrics.Gauge{"temp": 2}, nil), stamped(100, map[string]metrics.Gauge{"temp": 1}, nil)},
+			wantGauges: map[string]metrics.Gauge{"temp": 2},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+	}
+	db := newDatabase(t)
+	s := pgstore.New(db)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := db.ExecContext(t.Context(), `TRUNCATE gauges, counters`)
+			require.NoError(t, err)
+
+			for _, w := range tt.writes {
+				w(t, s)
+			}
+
+			snap, err := s.Snapshot(t.Context())
+			require.NoError(t, err)
+			wantCounters := map[string]metrics.Counter{}
+			if tt.wantHits != 0 {
+				wantCounters["hits"] = tt.wantHits
+			}
+			assert.Equal(t, metrics.Snapshot{Gauges: tt.wantGauges, Counters: wantCounters}, snap)
+			assert.Equal(t, tt.wantStamps, storedStamps(t, db))
+		})
+	}
+}
+
+// Batches race with stamps in random order; a check read before the row is locked would let an older
+// one win.
+func TestStorage_UpdateBatch_ConcurrentStampedBatchesKeepTheNewest(t *testing.T) {
+	const writers, batches = 16, 20
+	s := pgstore.New(newDatabase(t))
+
+	order := mathrand.Perm(writers * batches)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Go(func() {
+			<-start
+			for _, n := range order[w*batches : (w+1)*batches] {
+				stamp := int64(n + 1)
+				assert.NoError(t, s.UpdateBatch(t.Context(), metrics.Batch{
+					Gauges:   map[string]metrics.Gauge{"temp": metrics.Gauge(stamp), "load": metrics.Gauge(stamp)},
+					Counters: map[string]metrics.Counter{"hits": 1},
+					Stamp:    stamp,
+				}))
+			}
+		})
+	}
+	done := make(chan struct{})
+	var seen []metrics.Gauge
+	var reader sync.WaitGroup
+	reader.Go(func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			snap, err := s.Snapshot(t.Context())
+			if !assert.NoError(t, err) {
+				return
+			}
+			if v, ok := snap.Gauges["temp"]; ok {
+				seen = append(seen, v)
+			}
+		}
+	})
+	close(start)
+	wg.Wait()
+	close(done)
+	reader.Wait()
+
+	assert.IsNonDecreasing(t, seen)
+	snap, err := s.Snapshot(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, metrics.Snapshot{
+		Gauges:   map[string]metrics.Gauge{"temp": writers * batches, "load": writers * batches},
+		Counters: map[string]metrics.Counter{"hits": writers * batches},
+	}, snap)
 }

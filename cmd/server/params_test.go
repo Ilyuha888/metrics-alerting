@@ -16,7 +16,7 @@ func TestParseParams(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
-		// A variable missing from env is unset for the case, so the developer's own ADDRESS, STORE_INTERVAL, FILE_STORAGE_PATH, RESTORE and DATABASE_DSN cannot leak in.
+		// A variable missing from env is unset for the case, so the developer's own ADDRESS, STORE_INTERVAL, FILE_STORAGE_PATH, RESTORE, DATABASE_DSN and KEY cannot leak in.
 		env     map[string]string
 		want    params
 		wantErr string
@@ -28,10 +28,11 @@ func TestParseParams(t *testing.T) {
 		},
 		{
 			name: "debug log level",
-			args: []string{"-l", "debug"},
+			args: []string{"-log-level", "debug"},
 			want: params{address: config.DefaultAddress(), logLevel: slog.LevelDebug, storeInterval: 300 * time.Second, filePath: "", restore: true},
 		},
-		{name: "unknown log level", args: []string{"-l", "loud"}, wantErr: `invalid value "loud" for flag -l`},
+		{name: "unknown log level", args: []string{"-log-level", "loud"}, wantErr: `invalid value "loud" for flag -log-level`},
+		{name: "-l is not a server flag", args: []string{"-l", "debug"}, wantErr: "flag provided but not defined: -l"},
 		{
 			name: "number address",
 			args: []string{"-a", "127.0.0.1:1234"},
@@ -143,10 +144,36 @@ func TestParseParams(t *testing.T) {
 			env:  map[string]string{"DATABASE_DSN": "postgres://env/db"},
 			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, filePath: "", restore: true, databaseDSN: "postgres://env/db"},
 		},
+		{
+			name: "key is empty by default",
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, restore: true, key: ""},
+		},
+		{
+			name: "key flag",
+			args: []string{"-k", "flag-key"},
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, restore: true, key: "flag-key"},
+		},
+		{
+			name: "env key beats default",
+			env:  map[string]string{"KEY": "env-key"},
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, restore: true, key: "env-key"},
+		},
+		{
+			name: "env key beats flag",
+			args: []string{"-k", "flag-key"},
+			env:  map[string]string{"KEY": "env-key"},
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, restore: true, key: "env-key"},
+		},
+		{
+			name: "empty env key behaves as unset",
+			args: []string{"-k", "flag-key"},
+			env:  map[string]string{"KEY": ""},
+			want: params{address: config.DefaultAddress(), storeInterval: 300 * time.Second, restore: true, key: "flag-key"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, k := range []string{"ADDRESS", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE", "DATABASE_DSN"} {
+			for _, k := range []string{"ADDRESS", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE", "DATABASE_DSN", "KEY"} {
 				v, ok := tt.env[k]
 				// Setenv first so the test restores the developer's value; then unset if the case omits it.
 				t.Setenv(k, v)

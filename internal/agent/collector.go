@@ -5,6 +5,8 @@ import (
 	"maps"
 	"math/rand/v2"
 	"runtime"
+	"sync"
+	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 )
@@ -13,9 +15,12 @@ import (
 type Snapshot struct {
 	Gauges    map[string]metrics.Gauge
 	PollCount metrics.Counter
+	// Taken orders batches on the server; a zero Taken sends the batch unstamped.
+	Taken time.Time
 }
 
 type Collector struct {
+	mu        sync.Mutex
 	gauges    map[string]metrics.Gauge
 	pollCount metrics.Counter
 }
@@ -28,6 +33,9 @@ func NewCollector() *Collector {
 func (c *Collector) Poll() {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	c.gauges["Alloc"] = metrics.Gauge(m.Alloc)
 	c.gauges["BuckHashSys"] = metrics.Gauge(m.BuckHashSys)
@@ -61,13 +69,22 @@ func (c *Collector) Poll() {
 	c.pollCount++
 }
 
-// Snapshot copies and mutates nothing, so a failed report loses no polls.
+// Snapshot takes the PollCount delta away, so each poll is in exactly one snapshot however many
+// reports are in flight.
 func (c *Collector) Snapshot() Snapshot {
-	return Snapshot{Gauges: maps.Clone(c.gauges), PollCount: c.pollCount}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	snap := Snapshot{Gauges: maps.Clone(c.gauges), PollCount: c.pollCount}
+	c.pollCount = 0
+	return snap
 }
 
-// Reported subtracts what was delivered rather than zeroing, which stays correct when a
-// poll lands between the snapshot and this call.
-func (c *Collector) Reported(s Snapshot) {
-	c.pollCount -= s.PollCount
+// Restore adds back the delta of a snapshot that was not delivered; the gauges stay, since the
+// collector's own are newer.
+func (c *Collector) Restore(s Snapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pollCount += s.PollCount
 }

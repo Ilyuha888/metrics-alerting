@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/go-chi/chi/v5"
@@ -30,15 +32,26 @@ type handlers struct {
 	storage Storage
 	db      Pinger
 	log     *slog.Logger
+	keyed   bool
+	now     func() time.Time
+	// The two log-on-change states of trustedStamp. They are server-wide, since a request carries
+	// no agent identity.
+	clamping atomic.Bool
+	unsigned atomic.Bool
 }
 
 // NewRouter returns the routes; patterns alone answer 404 for a missing name, 405 for a wrong method.
-func NewRouter(s Storage, db Pinger, lg *slog.Logger) http.Handler {
-	h := &handlers{storage: s, db: db, log: lg}
+func NewRouter(s Storage, db Pinger, lg *slog.Logger, key []byte) http.Handler {
+	return newRouter(s, db, lg, key, time.Now)
+}
+
+func newRouter(s Storage, db Pinger, lg *slog.Logger, key []byte, now func() time.Time) http.Handler {
+	h := &handlers{storage: s, db: db, log: lg, keyed: len(key) > 0, now: now}
 
 	r := chi.NewRouter()
-	// Logging goes first, so it also records the 404s, 405s and gzip rejections the rest answer.
-	r.Use(WithLogging(lg), rejectUncleanPath, WithGzip)
+	// Logging goes first, so it also records the 404s, 405s, signature and gzip rejections the rest
+	// answer.
+	r.Use(WithLogging(lg), rejectUncleanPath, WithSignature(key), WithGzip)
 
 	r.Post("/update", h.updateJSON)
 	r.Post("/update/", h.updateJSON)

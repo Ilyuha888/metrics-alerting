@@ -30,16 +30,20 @@ func run() error {
 		return err
 	}
 
-	serverEndpoint := "http://" + p.address.String()
+	serverEndpoint := p.address.URL("http")
 	pollInterval := p.pollInterval
 	reportInterval := p.reportInterval
 	lg := logger.New(p.logLevel)
-	lg.Info("agent started", "server", serverEndpoint, "poll", pollInterval, "report", reportInterval)
+	lg.Info("agent started", "server", serverEndpoint, "poll", pollInterval, "report", reportInterval, "rate_limit", p.rateLimit)
 
-	c := agent.NewCollector()
-	s := agent.NewSender(serverEndpoint)
+	cfg := agent.Config{PollInterval: pollInterval, ReportInterval: reportInterval, RateLimit: p.rateLimit}
+	s := agent.NewSender(serverEndpoint, []byte(p.key))
+	a, err := agent.New(agent.NewCollector(), agent.NewSystemCollector(), s, cfg, lg)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	agent.New(c, s, pollInterval, reportInterval, lg).Run(ctx)
+	a.Run(ctx)
 	return nil
 }

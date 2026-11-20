@@ -25,4 +25,7 @@ type Snapshot struct {
 type Batch struct {
 	Gauges   map[string]Gauge
 	Counters map[string]Counter
+	// Stamp orders batches that reach the server out of order: a storage writes a gauge only if the
+	// stamp is newer than the one stored with it. 0 means no stamp, and the gauges are written as is.
+	Stamp int64
 }

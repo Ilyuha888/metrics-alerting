@@ -2,11 +2,13 @@ package filestore_test
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
@@ -199,23 +201,60 @@ func TestStorage_SetGauge_FailedSaveReturnsErrorAndKeepsValue(t *testing.T) {
 	assert.Equal(t, "metrics.json", entries[0].Name())
 }
 
-func TestStorage_SaveEvery_WritesTheFile(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "dumps")
-	path := filepath.Join(dir, "metrics.json")
-	st := newStorage(t, path, 10*time.Millisecond)
-	st.SetGauge(t.Context(), "temp", 36.6)
-	// SaveEvery cannot be stopped, so it may write while TempDir cleans up. Once dir is
-	// gone every later save fails, and the retry outlasts a save that was mid-write.
-	t.Cleanup(func() {
-		assert.Eventually(t, func() bool { return os.RemoveAll(dir) == nil }, time.Second, 10*time.Millisecond)
+// runSaveEvery starts SaveEvery and returns a channel closed when it returns.
+func runSaveEvery(ctx context.Context, st *filestore.Storage) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		st.SaveEvery(ctx)
+	}()
+	return done
+}
+
+func returned(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+func TestStorage_SaveEvery_WritesTheFileOnATick(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "dumps", "metrics.json")
+		st := newStorage(t, path, 10*time.Millisecond)
+		require.NoError(t, st.SetGauge(t.Context(), "temp", 36.6))
+		ctx, cancel := context.WithCancel(t.Context())
+		done := runSaveEvery(ctx, st)
+
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+
+		got, err := restoreStorage(t, path, time.Hour).Gauge(t.Context(), "temp")
+		require.NoError(t, err)
+		assert.Equal(t, metrics.Gauge(36.6), got)
+		cancel()
+		synctest.Wait()
+		assert.True(t, returned(done))
 	})
+}
 
-	go st.SaveEvery()
+func TestStorage_SaveEvery_ReturnsOnCancelWithoutSaving(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "metrics.json")
+		st := newStorage(t, path, time.Hour)
+		require.NoError(t, st.SetGauge(t.Context(), "temp", 36.6))
+		ctx, cancel := context.WithCancel(t.Context())
+		done := runSaveEvery(ctx, st)
 
-	assert.Eventually(t, func() bool {
+		cancel()
+		synctest.Wait()
+
+		assert.True(t, returned(done), "SaveEvery is still running after cancel")
 		_, err := os.Stat(path)
-		return err == nil
-	}, time.Second, 5*time.Millisecond)
+		assert.ErrorIs(t, err, os.ErrNotExist, "the last save is the caller's, after the server stops")
+	})
 }
 
 func TestStorage_UpdateBatch_SavesOnceOnlyWithZeroInterval(t *testing.T) {
@@ -223,6 +262,7 @@ func TestStorage_UpdateBatch_SavesOnceOnlyWithZeroInterval(t *testing.T) {
 		Gauges:   map[string]metrics.Gauge{"temp": 36.6, "load": 1.5},
 		Counters: map[string]metrics.Counter{"hits": 5, "errors": 1},
 	}
+	want := metrics.Snapshot{Gauges: batch.Gauges, Counters: batch.Counters}
 	tests := []struct {
 		name      string
 		interval  time.Duration
@@ -241,11 +281,11 @@ func TestStorage_UpdateBatch_SavesOnceOnlyWithZeroInterval(t *testing.T) {
 			require.NoError(t, st.UpdateBatch(t.Context(), batch))
 
 			assert.Equal(t, tt.wantSaves, *saves)
-			assert.Equal(t, metrics.Snapshot(batch), snapshot(t, st))
+			assert.Equal(t, want, snapshot(t, st))
 			_, err := os.Stat(path)
 			assert.Equal(t, tt.wantFile, err == nil)
 			if tt.wantFile {
-				assert.Equal(t, metrics.Snapshot(batch), snapshot(t, restoreStorage(t, path, time.Hour)))
+				assert.Equal(t, want, snapshot(t, restoreStorage(t, path, time.Hour)))
 			}
 		})
 	}
@@ -262,4 +302,109 @@ func TestStorage_UpdateBatch_FailedSaveReturnsErrorAndKeepsValues(t *testing.T) 
 	got, err := st.Counter(t.Context(), "hits")
 	require.NoError(t, err)
 	assert.Equal(t, metrics.Counter(5), got)
+}
+
+func stampedBatch(stamp int64, gauges map[string]metrics.Gauge, counters map[string]metrics.Counter) metrics.Batch {
+	return metrics.Batch{Gauges: gauges, Counters: counters, Stamp: stamp}
+}
+
+// Every batch saves at once, and the checks read a storage restored from the file, so a stamp that
+// lived only in memory would fail them.
+func TestStorage_UpdateBatch_StampedGaugeKeepsTheNewestAcrossARestore(t *testing.T) {
+	tests := []struct {
+		name       string
+		batches    []metrics.Batch
+		want       metrics.Snapshot
+		wantStamps map[string]int64
+	}{
+		{
+			name:       "newer stamp replaces the gauge",
+			batches:    []metrics.Batch{stampedBatch(100, map[string]metrics.Gauge{"temp": 1}, nil), stampedBatch(200, map[string]metrics.Gauge{"temp": 2}, nil)},
+			want:       metrics.Snapshot{Gauges: map[string]metrics.Gauge{"temp": 2}, Counters: map[string]metrics.Counter{}},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name: "older stamp skips the gauge and adds the counter",
+			batches: []metrics.Batch{
+				stampedBatch(200, map[string]metrics.Gauge{"temp": 2}, map[string]metrics.Counter{"hits": 1}),
+				stampedBatch(100, map[string]metrics.Gauge{"temp": 1}, map[string]metrics.Counter{"hits": 1}),
+			},
+			want:       metrics.Snapshot{Gauges: map[string]metrics.Gauge{"temp": 2}, Counters: map[string]metrics.Counter{"hits": 2}},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "equal stamp skips the gauge",
+			batches:    []metrics.Batch{stampedBatch(200, map[string]metrics.Gauge{"temp": 2}, nil), stampedBatch(200, map[string]metrics.Gauge{"temp": 3}, nil)},
+			want:       metrics.Snapshot{Gauges: map[string]metrics.Gauge{"temp": 2}, Counters: map[string]metrics.Counter{}},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+		{
+			name:       "unstamped batch writes the value and keeps the stamp",
+			batches:    []metrics.Batch{stampedBatch(200, map[string]metrics.Gauge{"temp": 2}, nil), stampedBatch(0, map[string]metrics.Gauge{"temp": 7, "load": 1}, nil)},
+			want:       metrics.Snapshot{Gauges: map[string]metrics.Gauge{"temp": 7, "load": 1}, Counters: map[string]metrics.Counter{}},
+			wantStamps: map[string]int64{"temp": 200},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metrics.json")
+			st := newStorage(t, path, 0)
+
+			for _, b := range tt.batches {
+				require.NoError(t, st.UpdateBatch(t.Context(), b))
+			}
+
+			snap, stamps := restoreStorage(t, path, time.Hour).SnapshotWithStamps()
+			assert.Equal(t, tt.want, snap)
+			assert.Equal(t, tt.wantStamps, stamps)
+		})
+	}
+}
+
+func TestNew_RestoredStampStillSkipsAnOlderBatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.json")
+	saved := newStorage(t, path, 0)
+	require.NoError(t, saved.UpdateBatch(t.Context(), stampedBatch(200, map[string]metrics.Gauge{"temp": 2}, nil)))
+
+	restored := restoreStorage(t, path, time.Hour)
+	require.NoError(t, restored.UpdateBatch(t.Context(), stampedBatch(100, map[string]metrics.Gauge{"temp": 1}, nil)))
+
+	got, err := restored.Gauge(t.Context(), "temp")
+	require.NoError(t, err)
+	assert.Equal(t, metrics.Gauge(2), got)
+}
+
+func TestStorage_Save_WritesTheStampOnlyForStampedGauges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.json")
+	st := newStorage(t, path, time.Hour)
+	require.NoError(t, st.UpdateBatch(t.Context(), stampedBatch(200, map[string]metrics.Gauge{"temp": 2}, map[string]metrics.Counter{"hits": 1})))
+	require.NoError(t, st.SetGauge(t.Context(), "load", 1))
+
+	require.NoError(t, st.Save())
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[
+		{"id":"hits","type":"counter","delta":1},
+		{"id":"load","type":"gauge","value":1},
+		{"id":"temp","type":"gauge","value":2,"stamp":200}
+	]`, string(got))
+}
+
+func TestNew_RestoresAFileWrittenWithoutStamps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.json")
+	require.NoError(t, os.WriteFile(path, []byte(`[{"id":"hits","type":"counter","delta":5},{"id":"temp","type":"gauge","value":36.6}]`), 0o644))
+
+	st := restoreStorage(t, path, time.Hour)
+	snap, stamps := st.SnapshotWithStamps()
+	require.NoError(t, st.UpdateBatch(t.Context(), stampedBatch(1, map[string]metrics.Gauge{"temp": 1}, nil)))
+
+	assert.Equal(t, metrics.Snapshot{
+		Gauges:   map[string]metrics.Gauge{"temp": 36.6},
+		Counters: map[string]metrics.Counter{"hits": 5},
+	}, snap)
+	assert.Empty(t, stamps)
+	got, err := st.Gauge(t.Context(), "temp")
+	require.NoError(t, err)
+	assert.Equal(t, metrics.Gauge(1), got, "a restored gauge without a stamp takes any stamped batch")
 }
