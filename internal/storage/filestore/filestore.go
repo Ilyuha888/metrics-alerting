@@ -60,7 +60,7 @@ func (s *Storage) load() error {
 		return fmt.Errorf("read %s: %w", s.path, err)
 	}
 
-	var list []models.Metrics
+	var list []record
 	if err := json.Unmarshal(data, &list); err != nil {
 		return fmt.Errorf("parse %s: %w", s.path, err)
 	}
@@ -72,7 +72,8 @@ func (s *Storage) load() error {
 			if m.Value == nil {
 				return fmt.Errorf("%s: gauge %q has no value", s.path, m.ID)
 			}
-			if err := s.Storage.SetGauge(context.Background(), m.ID, metrics.Gauge(*m.Value)); err != nil {
+			b := metrics.Batch{Gauges: map[string]metrics.Gauge{m.ID: metrics.Gauge(*m.Value)}, Stamp: m.Stamp}
+			if err := s.Storage.UpdateBatch(context.Background(), b); err != nil {
 				return fmt.Errorf("%s: gauge %q: %w", s.path, m.ID, err)
 			}
 		case metrics.KindCounter:
@@ -95,11 +96,8 @@ func (s *Storage) Save() error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 
-	snap, err := s.Snapshot(context.Background())
-	if err != nil {
-		return fmt.Errorf("snapshot metrics: %w", err)
-	}
-	data, err := json.MarshalIndent(toModels(snap), "", "  ")
+	snap, stamps := s.SnapshotWithStamps()
+	data, err := json.MarshalIndent(toRecords(snap, stamps), "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode metrics: %w", err)
 	}
@@ -133,18 +131,25 @@ func writeAndRename(tmp *os.File, data []byte, path string) error {
 	return nil
 }
 
-// toModels sorts by type, then id, so an unchanged storage writes an identical file.
-func toModels(snap metrics.Snapshot) []models.Metrics {
-	list := make([]models.Metrics, 0, len(snap.Gauges)+len(snap.Counters))
+// record is one metric in the file. A file written before stamps has none, and its gauges restore
+// unstamped. The stamp stays out of models.Metrics, which is the HTTP wire format.
+type record struct {
+	models.Metrics
+	Stamp int64 `json:"stamp,omitempty"`
+}
+
+// toRecords sorts by type, then id, so an unchanged storage writes an identical file.
+func toRecords(snap metrics.Snapshot, stamps map[string]int64) []record {
+	list := make([]record, 0, len(snap.Gauges)+len(snap.Counters))
 	for id, v := range snap.Gauges {
 		f := float64(v)
-		list = append(list, models.Metrics{ID: id, MType: metrics.KindGauge, Value: &f})
+		list = append(list, record{Metrics: models.Metrics{ID: id, MType: metrics.KindGauge, Value: &f}, Stamp: stamps[id]})
 	}
 	for id, v := range snap.Counters {
 		d := int64(v)
-		list = append(list, models.Metrics{ID: id, MType: metrics.KindCounter, Delta: &d})
+		list = append(list, record{Metrics: models.Metrics{ID: id, MType: metrics.KindCounter, Delta: &d}})
 	}
-	slices.SortFunc(list, func(a, b models.Metrics) int {
+	slices.SortFunc(list, func(a, b record) int {
 		return cmp.Or(cmp.Compare(a.MType, b.MType), cmp.Compare(a.ID, b.ID))
 	})
 	return list

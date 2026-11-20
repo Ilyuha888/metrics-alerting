@@ -38,8 +38,12 @@ func run() error {
 
 	cfg := agent.Config{PollInterval: pollInterval, ReportInterval: reportInterval, RateLimit: p.rateLimit}
 	s := agent.NewSender(serverEndpoint, []byte(p.key))
+	a, err := agent.New(agent.NewCollector(), agent.NewSystemCollector(), s, cfg, lg)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	agent.New(agent.NewCollector(), agent.NewSystemCollector(), s, cfg, lg).Run(ctx)
+	a.Run(ctx)
 	return nil
 }

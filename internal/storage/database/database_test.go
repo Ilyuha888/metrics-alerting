@@ -9,19 +9,16 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/Ilyuha888/metrics-alerting/internal/storage/pgtest"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
@@ -96,16 +93,38 @@ func TestMigrations_UpDownUp_LeavesTables(t *testing.T) {
 	provider, err := newProvider(db)
 	require.NoError(t, err)
 
-	_, err = provider.Down(t.Context())
+	_, err = provider.DownTo(t.Context(), 0)
 	require.NoError(t, err)
 	assert.False(t, tableExists(t, db, "gauges"))
 	assert.False(t, tableExists(t, db, "counters"))
 
 	results, err := provider.Up(t.Context())
 	require.NoError(t, err)
-	assert.Len(t, results, 1)
+	assert.Len(t, results, 2)
 	assert.True(t, tableExists(t, db, "gauges"))
 	assert.True(t, tableExists(t, db, "counters"))
+}
+
+// A database the previous server migrated already holds gauges; the stamp column must add to it, not
+// require an empty table, and the old rows must read as unstamped.
+func TestMigrations_StampOnADatabaseFromBeforeIt_KeepsOldRowsUnstamped(t *testing.T) {
+	db := plainDatabase(t)
+	provider, err := newProvider(db)
+	require.NoError(t, err)
+	_, err = provider.UpTo(t.Context(), 1)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO gauges (name, value) VALUES ('temp', 36.6)`)
+	require.NoError(t, err)
+
+	results, err := provider.Up(t.Context())
+
+	require.NoError(t, err)
+	assert.Len(t, results, 1)
+	var value float64
+	var stamp sql.NullInt64
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT value, stamp FROM gauges WHERE name = 'temp'`).Scan(&value, &stamp))
+	assert.Equal(t, 36.6, value)
+	assert.False(t, stamp.Valid)
 }
 
 func openerGoroutines() int {
@@ -114,31 +133,10 @@ func openerGoroutines() int {
 	return strings.Count(string(buf), "database/sql.(*DB).connectionOpener")
 }
 
-// socketName is the file pgx dials in a socket directory for port 5432.
-const socketName = ".s.PGSQL.5432"
-
-// refusingSocketDir returns a directory holding a Unix socket nobody listens on, so a dial there is
-// refused by the kernel. A released TCP port can be taken by another process before the dial; this
-// path is the test's own.
-func refusingSocketDir(t *testing.T) string {
-	t.Helper()
-	// Not t.TempDir: it names the directory after the test, past the 104 bytes macOS allows a socket path.
-	dir, err := os.MkdirTemp("", "pg")
-	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(dir)) })
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, socketName), Net: "unix"})
-	require.NoError(t, err)
-	// Without the file the dial fails with "no such file", not a refusal.
-	l.SetUnlinkOnClose(false)
-	require.NoError(t, l.Close())
-	return dir
-}
-
-// refusedDSN points at a refusingSocketDir. The port is set so a PGPORT in the environment cannot
-// change the socket's file name.
+// refusedDSN points at a socket that refuses every connection.
 func refusedDSN(t *testing.T, password string) string {
 	t.Helper()
-	return fmt.Sprintf("postgres://u:%s@/x?host=%s&port=5432&sslmode=disable", password, refusingSocketDir(t))
+	return pgtest.DSN(t, fmt.Sprintf("postgres://u:%s@/x", password), pgtest.RefusingDir(t))
 }
 
 // silentPort accepts connections and never answers, as a stuck database does.
@@ -210,103 +208,6 @@ func TestOpen_UnusableDatabase_ReturnsErrorInTimeAndLeavesNoPool(t *testing.T) {
 	}
 }
 
-// proxy forwards a Unix socket to the real database once opened. Until then nothing listens there, so
-// the driver sees a real refused connection without the container being stopped.
-type proxy struct {
-	t           *testing.T
-	dir         string
-	target      string
-	connections atomic.Int32
-
-	mu       sync.Mutex
-	closed   bool
-	listener net.Listener
-	conns    []net.Conn
-}
-
-func newProxy(t *testing.T, target string) *proxy {
-	t.Helper()
-	p := &proxy{t: t, dir: refusingSocketDir(t), target: target}
-	t.Cleanup(p.close)
-	return p
-}
-
-func (p *proxy) open() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return
-	}
-	path := filepath.Join(p.dir, socketName)
-	// A listen on a path that exists fails, and the refusing socket's file is still there.
-	if !assert.NoError(p.t, os.Remove(path)) {
-		return
-	}
-	l, err := net.Listen("unix", path)
-	if !assert.NoError(p.t, err) {
-		return
-	}
-	p.listener = l
-	go p.serve(l)
-}
-
-func (p *proxy) openAfter(d time.Duration) {
-	timer := time.AfterFunc(d, p.open)
-	p.t.Cleanup(func() { timer.Stop() })
-}
-
-func (p *proxy) serve(l net.Listener) {
-	for {
-		client, err := l.Accept()
-		if err != nil {
-			return
-		}
-		p.connections.Add(1)
-		server, err := net.Dial("tcp", p.target)
-		if !assert.NoError(p.t, err) {
-			client.Close()
-			return
-		}
-		p.mu.Lock()
-		p.conns = append(p.conns, client, server)
-		p.mu.Unlock()
-		go forward(client, server)
-		go forward(server, client)
-	}
-}
-
-func forward(to, from net.Conn) {
-	io.Copy(to, from)
-	to.Close()
-	from.Close()
-}
-
-func (p *proxy) close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.closed = true
-	if p.listener != nil {
-		p.listener.Close()
-	}
-	for _, c := range p.conns {
-		c.Close()
-	}
-}
-
-// through returns dsn pointed at the proxy. TLS stays off, so one attempt is one connection.
-func (p *proxy) through(t *testing.T, dsn string) string {
-	t.Helper()
-	u, err := url.Parse(dsn)
-	require.NoError(t, err)
-	u.Host = ""
-	q := u.Query()
-	q.Set("host", p.dir)
-	q.Set("port", "5432")
-	q.Set("sslmode", "disable")
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 func hostOf(t *testing.T, dsn string) string {
 	t.Helper()
 	u, err := url.Parse(dsn)
@@ -317,11 +218,11 @@ func hostOf(t *testing.T, dsn string) string {
 func TestOpen_DatabaseComingUpDuringAPause_Succeeds(t *testing.T) {
 	const opensAfter, pause = 200 * time.Millisecond, 600 * time.Millisecond
 	dsn := newDatabaseDSN(t)
-	p := newProxy(t, hostOf(t, dsn))
-	p.openAfter(opensAfter)
+	p := pgtest.NewProxy(t, hostOf(t, dsn))
+	p.StartAfter(opensAfter)
 	start := time.Now()
 
-	db, err := open(t.Context(), p.through(t, dsn), []time.Duration{pause})
+	db, err := open(t.Context(), p.DSN(dsn), []time.Duration{pause})
 
 	require.NoError(t, err)
 	defer db.Close()
@@ -362,9 +263,9 @@ const retryPauseBelow = 900 * time.Millisecond
 
 func TestOpen_WrongPassword_FailsWithoutRepeats(t *testing.T) {
 	dsn := newDatabaseDSN(t)
-	p := newProxy(t, hostOf(t, dsn))
-	p.open()
-	u, err := url.Parse(p.through(t, dsn))
+	p := pgtest.NewProxy(t, hostOf(t, dsn))
+	p.Start()
+	u, err := url.Parse(p.DSN(dsn))
 	require.NoError(t, err)
 	u.User = url.UserPassword(u.User.Username(), "wrong")
 
@@ -374,7 +275,7 @@ func TestOpen_WrongPassword_FailsWithoutRepeats(t *testing.T) {
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, pgerrcode.InvalidPassword, pgErr.Code)
-	assert.EqualValues(t, 1, p.connections.Load())
+	assert.Equal(t, 1, p.Connections())
 }
 
 // plainDatabase opens a throwaway database with no migrations, for failures any table can produce.

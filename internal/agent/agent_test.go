@@ -36,8 +36,41 @@ func config(poll, report time.Duration, rateLimit int) Config {
 	return Config{PollInterval: poll, ReportInterval: report, RateLimit: rateLimit}
 }
 
-func newAgent(r reporter, cfg Config, lg *slog.Logger) *Agent {
-	return New(NewCollector(), NewSystemCollector(), r, cfg, lg)
+func newAgent(t *testing.T, r reporter, cfg Config, lg *slog.Logger) *Agent {
+	t.Helper()
+	a, err := New(NewCollector(), NewSystemCollector(), r, cfg, lg)
+	require.NoError(t, err)
+	return a
+}
+
+func TestNew_NonPositiveConfig_ReturnsErrorNamingTheField(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{name: "zero poll interval", cfg: config(0, time.Second, 1), wantErr: "PollInterval must be positive, got 0s"},
+		{name: "negative poll interval", cfg: config(-time.Second, time.Second, 1), wantErr: "PollInterval must be positive, got -1s"},
+		{name: "zero report interval", cfg: config(time.Second, 0, 1), wantErr: "ReportInterval must be positive, got 0s"},
+		{name: "negative report interval", cfg: config(time.Second, -time.Second, 1), wantErr: "ReportInterval must be positive, got -1s"},
+		{name: "zero rate limit", cfg: config(time.Second, time.Second, 0), wantErr: "RateLimit must be positive, got 0"},
+		{name: "negative rate limit", cfg: config(time.Second, time.Second, -1), wantErr: "RateLimit must be positive, got -1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, err := New(NewCollector(), NewSystemCollector(), &stubReporter{}, tt.cfg, discard)
+
+			assert.Nil(t, a)
+			assert.EqualError(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestNew_SmallestPositiveConfig_ReturnsAgent(t *testing.T) {
+	a, err := New(NewCollector(), NewSystemCollector(), &stubReporter{}, config(time.Nanosecond, time.Nanosecond, 1), discard)
+
+	require.NoError(t, err)
+	assert.NotNil(t, a)
 }
 
 func pending(c *Collector) metrics.Counter {
@@ -56,7 +89,7 @@ func pollAndSend(t *testing.T, a *Agent) error {
 
 func TestAgent_send_FailedReportKeepsThePolls(t *testing.T) {
 	rep := &stubReporter{err: errors.New("server is down")}
-	a := newAgent(rep, config(time.Second, time.Second, 1), discard)
+	a := newAgent(t, rep, config(time.Second, time.Second, 1), discard)
 
 	for range 5 {
 		a.collector.Poll()
@@ -74,7 +107,7 @@ func TestAgent_send_FailedReportKeepsThePolls(t *testing.T) {
 
 func TestAgent_send_RecoversAfterAFailedReport(t *testing.T) {
 	rep := &stubReporter{err: errors.New("server is down")}
-	a := newAgent(rep, config(time.Second, time.Second, 1), discard)
+	a := newAgent(t, rep, config(time.Second, time.Second, 1), discard)
 
 	for range 5 {
 		a.collector.Poll()
@@ -106,7 +139,7 @@ func pollCountOf(t *testing.T, list []models.Metrics) int64 {
 
 func TestAgent_send_RejectedBatchKeepsThePollsUntilOneLands(t *testing.T) {
 	sender, rec := recordingServer(t, http.StatusInternalServerError)
-	a := newAgent(sender, config(time.Second, time.Second, 1), discard)
+	a := newAgent(t, sender, config(time.Second, time.Second, 1), discard)
 
 	require.Error(t, pollAndSend(t, a))
 	require.Error(t, pollAndSend(t, a))
@@ -127,7 +160,7 @@ func TestAgent_send_UnreachableServerKeepsThePollsAfterEveryDial(t *testing.T) {
 	sender := NewSender(unreachable, nil)
 	sender.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
 	dials := refuseDials(sender, everyDial)
-	a := newAgent(sender, config(time.Second, time.Second, 1), discard)
+	a := newAgent(t, sender, config(time.Second, time.Second, 1), discard)
 
 	require.Error(t, pollAndSend(t, a))
 
@@ -145,7 +178,7 @@ func TestAgent_send_ClientTimeoutIsLoggedAsAFailure(t *testing.T) {
 	defer srv.Close()
 	sender := NewSender(srv.URL, nil)
 	sender.client.Timeout = 100 * time.Millisecond
-	a := newAgent(sender, config(time.Second, time.Second, 1), lg)
+	a := newAgent(t, sender, config(time.Second, time.Second, 1), lg)
 
 	require.Error(t, pollAndSend(t, a))
 
@@ -206,7 +239,7 @@ func TestAgent_Run_PollsAndReportsOnTheInterval(t *testing.T) {
 		time.AfterFunc(7*time.Second, cancel)
 		rep := &scriptedReporter{start: time.Now()}
 
-		newAgent(rep, config(2*time.Second, 2*time.Second, 1), discard).Run(ctx)
+		newAgent(t, rep, config(2*time.Second, 2*time.Second, 1), discard).Run(ctx)
 
 		require.Len(t, rep.calls, 4)
 		for i, wantAt := range []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second, 7 * time.Second} {
@@ -222,7 +255,7 @@ func TestAgent_Run_ReportsOnTheReportIntervalNotOnPolls(t *testing.T) {
 		time.AfterFunc(350*time.Millisecond, cancel)
 		rep := &scriptedReporter{start: time.Now()}
 
-		newAgent(rep, config(30*time.Millisecond, 100*time.Millisecond, 1), discard).Run(ctx)
+		newAgent(t, rep, config(30*time.Millisecond, 100*time.Millisecond, 1), discard).Run(ctx)
 
 		require.Len(t, rep.calls, 4)
 		for i, wantAt := range []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond, 350 * time.Millisecond} {
@@ -238,7 +271,7 @@ func TestAgent_Run_EachReportIsStampedWhenTaken(t *testing.T) {
 		time.AfterFunc(250*time.Millisecond, cancel)
 		rep := &scriptedReporter{start: time.Now()}
 
-		newAgent(rep, config(30*time.Millisecond, 100*time.Millisecond, 1), discard).Run(ctx)
+		newAgent(t, rep, config(30*time.Millisecond, 100*time.Millisecond, 1), discard).Run(ctx)
 
 		require.Len(t, rep.calls, 3)
 		for i, wantAt := range []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 250 * time.Millisecond} {
@@ -254,7 +287,7 @@ func TestAgent_Run_ReportCarriesRuntimeAndSystemGauges(t *testing.T) {
 		time.AfterFunc(3*time.Second, cancel)
 		rep := &scriptedReporter{start: time.Now()}
 
-		newAgent(rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
+		newAgent(t, rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
 
 		require.NotEmpty(t, rep.calls)
 		gauges := rep.calls[0].snap.Gauges
@@ -296,9 +329,10 @@ func TestAgent_Run_KeepsSendsInFlightAtTheRateLimit(t *testing.T) {
 				rep := &blockingReporter{release: make(chan struct{})}
 				done := make(chan struct{})
 
+				a := newAgent(t, rep, config(time.Second, time.Second, limit), discard)
 				go func() {
 					defer close(done)
-					newAgent(rep, config(time.Second, time.Second, limit), discard).Run(ctx)
+					a.Run(ctx)
 				}()
 				time.Sleep(time.Duration(limit+5)*time.Second + 500*time.Millisecond)
 				synctest.Wait()
@@ -322,7 +356,7 @@ func TestAgent_Run_PollsWhileASendIsSlow(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		rep := &blockingReporter{release: make(chan struct{})}
-		a := newAgent(rep, config(time.Second, 2500*time.Millisecond, 1), discard)
+		a := newAgent(t, rep, config(time.Second, 2500*time.Millisecond, 1), discard)
 		done := make(chan struct{})
 
 		go func() {
@@ -370,7 +404,7 @@ func TestAgent_Run_EachPollIsCountedOnceWithSendsInFlight(t *testing.T) {
 					return nil
 				}
 
-				newAgent(rep, config(time.Second, 2500*time.Millisecond, 2), discard).Run(ctx)
+				newAgent(t, rep, config(time.Second, 2500*time.Millisecond, 2), discard).Run(ctx)
 
 				require.Len(t, rep.calls, 4)
 				assert.EqualValues(t, 2, rep.calls[0].snap.PollCount)
@@ -400,9 +434,10 @@ func TestAgent_Run_CancelDuringASendWaitsForItThenReportsTheRest(t *testing.T) {
 		}}
 		done := make(chan struct{})
 
+		a := newAgent(t, rep, config(time.Second, 2500*time.Millisecond, 1), discard)
 		go func() {
 			defer close(done)
-			newAgent(rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
+			a.Run(ctx)
 		}()
 		time.Sleep(3200 * time.Millisecond)
 		cancel()
@@ -438,9 +473,10 @@ func TestAgent_Run_CancelWhileTheReporterWaitsForAWorkerKeepsItsSnapshot(t *test
 		}}
 		done := make(chan struct{})
 
+		a := newAgent(t, rep, config(time.Second, 2500*time.Millisecond, 1), discard)
 		go func() {
 			defer close(done)
-			newAgent(rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
+			a.Run(ctx)
 		}()
 		time.Sleep(5500 * time.Millisecond)
 		cancel()
@@ -471,7 +507,7 @@ func TestAgent_Run_CancelWhileWaitingSendsTheLastReport(t *testing.T) {
 				defer cancel()
 				time.AfterFunc(tt.cancelAt, cancel)
 				rep := &scriptedReporter{start: time.Now()}
-				a := newAgent(rep, config(time.Second, time.Hour, 1), discard)
+				a := newAgent(t, rep, config(time.Second, time.Hour, 1), discard)
 
 				a.Run(ctx)
 
@@ -491,7 +527,7 @@ func TestAgent_Run_ContextDoneAsTheTimerFiresRunsNoPoll(t *testing.T) {
 	for range 100 {
 		rep := &stubReporter{}
 
-		newAgent(rep, config(time.Nanosecond, time.Hour, 1), discard).Run(ctx)
+		newAgent(t, rep, config(time.Nanosecond, time.Hour, 1), discard).Run(ctx)
 
 		require.Len(t, rep.sent, 1)
 		require.EqualValues(t, 0, rep.sent[0].PollCount)
@@ -522,7 +558,7 @@ func TestAgent_Run_CancelDuringASendSendsALastReportOnlyAfterASuccess(t *testing
 					return nil
 				}}
 
-				newAgent(rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
+				newAgent(t, rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
 
 				assert.Equal(t, 2500*time.Millisecond, time.Since(rep.start))
 				require.Len(t, rep.calls, tt.wantSends)
@@ -547,7 +583,7 @@ func TestAgent_Run_FailedSendThenCancelWhileWaitingSendsTheLastReport(t *testing
 			return nil
 		}}
 
-		newAgent(rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
+		newAgent(t, rep, config(time.Second, 2500*time.Millisecond, 1), discard).Run(ctx)
 
 		require.Len(t, rep.calls, 2)
 		assert.EqualValues(t, 3, rep.calls[1].snap.PollCount, "nothing was delivered, so the last report carries it")
@@ -606,7 +642,7 @@ func TestAgent_Run_LogsTheStopAndOnlyRealFailures(t *testing.T) {
 					return tt.sendErr
 				}}
 
-				newAgent(rep, config(time.Second, time.Second, 1), lg).Run(ctx)
+				newAgent(t, rep, config(time.Second, time.Second, 1), lg).Run(ctx)
 
 				assert.Contains(t, logged.String(), stopped)
 				for _, line := range tt.want {
@@ -630,9 +666,10 @@ func TestAgent_Run_PauseCutOnARealSenderLogsNoErrorAndDialsOnce(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 
+	a := newAgent(t, sender, config(time.Millisecond, time.Millisecond, 1), lg)
 	go func() {
 		defer close(done)
-		newAgent(sender, config(time.Millisecond, time.Millisecond, 1), lg).Run(ctx)
+		a.Run(ctx)
 	}()
 	require.Eventually(t, func() bool { return dials.Load() == 1 }, 2*time.Second, time.Millisecond)
 	cancel()

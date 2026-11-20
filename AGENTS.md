@@ -28,6 +28,8 @@ Module path is `github.com/Ilyuha888/metrics-alerting`.
 - `internal/storage/database/` — `Open`, which returns a pinged `*sql.DB` with the embedded goose
   migrations from `migrations/` applied; `IsRetriable` and `IsConnectionLost`, which classify PostgreSQL errors for `retry.Do`.
 - `internal/storage/pgstore/` — `Storage`, the `handler.Storage` on PostgreSQL, over the pool from `database`.
+- `internal/storage/pgtest/` — test helpers for `database` and `pgstore`: `RefusingDir`, a socket that refuses
+  connections, and `Proxy`, which refuses them until `Start`.
 - `internal/handler/` — the HTTP layer on chi. It declares the `Storage` and `Pinger`
   interfaces it needs, and passes the request's context to both.
 - `internal/agent/` — `Collector` (runtime), `SystemCollector` (gopsutil: memory and CPU load), `Sender`,
@@ -173,17 +175,23 @@ Several workers send at once, so batches can reach the server out of order. The 
 snapshot with the time it took it, and `Sender` puts that time in `X-Metrics-Timestamp` as Unix
 nanoseconds, the same value on every attempt. A zero time sends no header.
 
-On `POST /updates/` with the header, the handler keeps, per gauge, the stamp of the batch that last wrote
-it. Under one lock it drops the gauges whose stamp is not newer than the stored one, writes the rest with
-`UpdateBatch`, and records their stamps only if the write succeeded. Counters are always added.
+On `POST /updates/` the handler sets `metrics.Batch.Stamp` to the trusted stamp, 0 for none, and the storage
+orders the gauges by it. Each storage keeps, per gauge, the stamp of the batch that last wrote it, and writes
+a gauge only if the batch's stamp is newer, in the same step as the write: `memstorage` under its mutex, in a
+map; `filestore` through `memstorage`, and in its JSON file as `stamp` on each stamped gauge; `pgstore` in the
+`stamp` column of `gauges`, checked by the upsert's `WHERE` on the locked row. Counters are always added.
 
-- No header (the autotests, `/update/`, `POST /update`): stored as before; no check, no stamp recorded.
-- A header that is not a decimal integer: 400, nothing stored.
-- The stamp counts only if the request passed a `HashSHA256` check (on a server with a key) and is at most
-  `maxStampLead`, 1 minute, ahead of the server clock. Otherwise the batch is stored as without the header,
-  and a Warn is logged: an unchecked or far-future stamp would skip every later batch's gauges.
-- Stamps live in the handler's memory only. The storages do not know them, and a restarted server takes
-  the first stamped batch as is.
+- No stamp (no header, a header of `0`, an untrusted stamp; `/update/` and `POST /update`): the gauges are
+  written and the stored stamp stays, so an older stamped batch is still skipped after them.
+- A header that is not a decimal integer: 400 with the parse error in the body, nothing stored.
+- On a server with a key, a stamp counts only if the request passed the `HashSHA256` check; an unsigned one
+  is stored as without the header, since a forged stamp would skip later batches' gauges.
+- A stamp more than `maxStampLead`, 1 minute, ahead of the server clock is clamped to now plus 1 minute: an
+  agent whose clock runs ahead keeps its order, and a forged stamp holds a gauge for at most a minute.
+- Both cases log on change, not per batch: a Warn when unsigned stamps or clamping start, an Info when a
+  signed or in-limit stamp arrives after them. The state is server-wide, since a request names no agent.
+- Stamps outlive a restart with a file (restored with `-r`) or a database. A file written before stamps
+  restores with none, and its gauges take the first stamped batch.
 - The `HashSHA256` signature covers the body, not this header.
 
 ## Updating the template

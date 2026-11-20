@@ -4,12 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"net/url"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +16,7 @@ import (
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
 	"github.com/Ilyuha888/metrics-alerting/internal/storage/pgstore"
+	"github.com/Ilyuha888/metrics-alerting/internal/storage/pgtest"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -27,121 +25,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// socketName is the file pgx dials in a socket directory for port 5432.
-const socketName = ".s.PGSQL.5432"
-
-// proxy forwards a Unix socket to the real database once opened. Until then the socket's file is there
-// with nobody listening, so the driver sees a real refused connection without the container being
-// stopped. A released TCP port can be taken by another process before the dial; this path is the test's
-// own.
-type proxy struct {
-	t           *testing.T
-	dir         string
-	target      string
-	connections atomic.Int32
-
-	mu       sync.Mutex
-	closed   bool
-	listener net.Listener
-	conns    []net.Conn
-}
-
-func newProxy(t *testing.T, target string) *proxy {
-	t.Helper()
-	// Not t.TempDir: it names the directory after the test, past the 104 bytes macOS allows a socket path.
-	dir, err := os.MkdirTemp("", "pg")
-	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(dir)) })
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(dir, socketName), Net: "unix"})
-	require.NoError(t, err)
-	// Without the file the dial fails with "no such file", not a refusal.
-	l.SetUnlinkOnClose(false)
-	require.NoError(t, l.Close())
-	p := &proxy{t: t, dir: dir, target: target}
-	t.Cleanup(p.close)
-	return p
-}
-
-// through points u at the proxy. The port is set so a PGPORT in the environment cannot change the
-// socket's file name.
-func (p *proxy) through(u *url.URL) {
-	u.Host = ""
-	q := u.Query()
-	q.Set("host", p.dir)
-	q.Set("port", "5432")
-	q.Set("sslmode", "disable")
-	u.RawQuery = q.Encode()
-}
-
-func (p *proxy) open() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return
-	}
-	path := filepath.Join(p.dir, socketName)
-	// A listen on a path that exists fails, and the refusing socket's file is still there.
-	if !assert.NoError(p.t, os.Remove(path)) {
-		return
-	}
-	l, err := net.Listen("unix", path)
-	if !assert.NoError(p.t, err) {
-		return
-	}
-	p.listener = l
-	go p.serve(l)
-}
-
-func (p *proxy) openAfter(d time.Duration) {
-	timer := time.AfterFunc(d, p.open)
-	p.t.Cleanup(func() { timer.Stop() })
-}
-
-func (p *proxy) serve(l net.Listener) {
-	for {
-		client, err := l.Accept()
-		if err != nil {
-			return
-		}
-		p.connections.Add(1)
-		server, err := net.Dial("tcp", p.target)
-		if !assert.NoError(p.t, err) {
-			client.Close()
-			return
-		}
-		p.mu.Lock()
-		p.conns = append(p.conns, client, server)
-		p.mu.Unlock()
-		go forward(client, server)
-		go forward(server, client)
-	}
-}
-
-func forward(to, from net.Conn) {
-	io.Copy(to, from)
-	to.Close()
-	from.Close()
-}
-
-func (p *proxy) close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.closed = true
-	if p.listener != nil {
-		p.listener.Close()
-	}
-	for _, c := range p.conns {
-		c.Close()
-	}
-}
-
 // behindProxy is one throwaway database with two ways in: direct prepares and reads back
 // past the outage, and store goes through the proxy.
 type behindProxy struct {
 	direct *pgstore.Storage
 	db     *sql.DB
 	store  *pgstore.Storage
-	proxy  *proxy
+	proxy  *pgtest.Proxy
 }
 
 // newBehindProxy opens no idle connections, so at the proxy one attempt is one connection.
@@ -152,10 +42,9 @@ func newBehindProxy(t *testing.T) *behindProxy {
 
 	u, err := url.Parse(dsn)
 	require.NoError(t, err)
-	p := newProxy(t, u.Host)
-	p.through(u)
+	p := pgtest.NewProxy(t, u.Host)
 
-	db, err := sql.Open("pgx", u.String())
+	db, err := sql.Open("pgx", p.DSN(dsn))
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, db.Close()) })
 	db.SetMaxIdleConns(0)
@@ -177,7 +66,7 @@ func TestStorage_Outage_EveryMethodSucceedsOnceTheProxyOpens(t *testing.T) {
 			require.NoError(t, b.direct.SetGauge(t.Context(), "x", 1))
 			require.NoError(t, b.direct.AddCounter(t.Context(), "x", 1))
 			b.store.SetDelays([]time.Duration{pause})
-			b.proxy.openAfter(opensAfter)
+			b.proxy.StartAfter(opensAfter)
 			start := time.Now()
 
 			err := tt.call(t.Context(), b.store)
@@ -194,7 +83,7 @@ func TestStorage_Outage_ReturnsWhatWasStored(t *testing.T) {
 	require.NoError(t, b.direct.SetGauge(t.Context(), "temp", 36.6))
 	require.NoError(t, b.direct.AddCounter(t.Context(), "hits", 527))
 	b.store.SetDelays([]time.Duration{pause})
-	b.proxy.openAfter(opensAfter)
+	b.proxy.StartAfter(opensAfter)
 
 	snap, err := b.store.Snapshot(t.Context())
 
@@ -229,7 +118,7 @@ func TestStorage_Outage_CounterIsAddedOnce(t *testing.T) {
 			b := newBehindProxy(t)
 			require.NoError(t, b.direct.AddCounter(t.Context(), "hits", 10))
 			b.store.SetDelays([]time.Duration{pause})
-			b.proxy.openAfter(opensAfter)
+			b.proxy.StartAfter(opensAfter)
 			start := time.Now()
 
 			require.NoError(t, tt.call(t.Context(), b.store))
@@ -247,7 +136,7 @@ func TestStorage_Outage_PauseLongerThanTheQueryTimeoutKeepsRepeating(t *testing.
 	const longPause = 3200 * time.Millisecond
 	b := newBehindProxy(t)
 	b.store.SetDelays([]time.Duration{longPause})
-	b.proxy.openAfter(opensAfter)
+	b.proxy.StartAfter(opensAfter)
 
 	err := b.store.SetGauge(t.Context(), "x", 1)
 
@@ -313,20 +202,20 @@ func TestStorage_NonRetriableError_MakesOneAttempt(t *testing.T) {
 			b := newBehindProxy(t)
 			require.NoError(t, b.direct.AddCounter(t.Context(), "hits", math.MaxInt64))
 			b.store.SetDelays([]time.Duration{time.Millisecond, time.Millisecond, time.Millisecond})
-			b.proxy.open()
+			b.proxy.Start()
 
 			err := tt.call(t.Context(), b.store)
 
 			require.ErrorContains(t, err, tt.text)
 			assert.NotContains(t, err.Error(), "attempt")
-			assert.EqualValues(t, 1, b.proxy.connections.Load())
+			assert.Equal(t, 1, b.proxy.Connections())
 		})
 	}
 }
 
 func TestStorage_Read_NotFoundStaysTheSameError(t *testing.T) {
 	b := newBehindProxy(t)
-	b.proxy.open()
+	b.proxy.Start()
 
 	_, gaugeErr := b.store.Gauge(t.Context(), "nope")
 	_, counterErr := b.store.Counter(t.Context(), "nope")
@@ -752,9 +641,10 @@ func TestStorage_UpdateBatch_ConnectionLostAfterBegin_MakesOneAttempt(t *testing
 func TestStorage_UpdateBatch_BeginFailureThatIsNotALostConnection_MakesOneAttempt(t *testing.T) {
 	u, err := url.Parse(newDatabaseDSN(t))
 	require.NoError(t, err)
-	p := newProxy(t, u.Host)
-	p.open()
-	p.through(u)
+	p := pgtest.NewProxy(t, u.Host)
+	p.Start()
+	u, err = url.Parse(p.DSN(u.String()))
+	require.NoError(t, err)
 	u.User = url.UserPassword(u.User.Username(), "wrong")
 	db, err := sql.Open("pgx", u.String())
 	require.NoError(t, err)
@@ -768,5 +658,5 @@ func TestStorage_UpdateBatch_BeginFailureThatIsNotALostConnection_MakesOneAttemp
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, pgerrcode.InvalidPassword, pgErr.Code)
 	assert.ErrorContains(t, err, "begin batch: ")
-	assert.EqualValues(t, 1, p.connections.Load())
+	assert.Equal(t, 1, p.Connections())
 }

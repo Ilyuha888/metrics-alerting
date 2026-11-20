@@ -94,7 +94,7 @@ func (s *Storage) UpdateBatch(ctx context.Context, b metrics.Batch) error {
 		// the connection: left to cancel, the rollback closes the connection, and the next call reconnects.
 		defer tx.Rollback()
 
-		if err := upsertGauges(ctx, tx, b.Gauges); err != nil {
+		if err := upsertGauges(ctx, tx, b.Gauges, b.Stamp); err != nil {
 			return fmt.Errorf("batch gauges: %w", err)
 		}
 		if err := upsertCounters(ctx, tx, b.Counters); err != nil {
@@ -107,15 +107,21 @@ func (s *Storage) UpdateBatch(ctx context.Context, b metrics.Batch) error {
 	})
 }
 
-func upsertGauges(ctx context.Context, tx *sql.Tx, gauges map[string]metrics.Gauge) error {
+// upsertGauges checks the stamp in the statement: ON CONFLICT locks the row and reads its latest
+// committed stamp, so two batches racing for a gauge cannot both pass the check. A batch without a
+// stamp (NULL here) writes the value and keeps the stored stamp, as memstorage does.
+func upsertGauges(ctx context.Context, tx *sql.Tx, gauges map[string]metrics.Gauge, stamp int64) error {
 	names := slices.Sorted(maps.Keys(gauges))
 	values := make([]float64, len(names))
 	for i, name := range names {
 		values[i] = float64(gauges[name])
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO gauges (name, value) SELECT * FROM unnest($1::text[], $2::double precision[]) ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value`,
-		names, values)
+		`INSERT INTO gauges (name, value, stamp)
+		SELECT name, value, $3::bigint FROM unnest($1::text[], $2::double precision[]) AS t(name, value)
+		ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, stamp = COALESCE(EXCLUDED.stamp, gauges.stamp)
+		WHERE EXCLUDED.stamp IS NULL OR gauges.stamp IS NULL OR gauges.stamp < EXCLUDED.stamp`,
+		names, values, sql.NullInt64{Int64: stamp, Valid: stamp != 0})
 	return err
 }
 

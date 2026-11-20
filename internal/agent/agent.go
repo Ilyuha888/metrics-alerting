@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"sync"
@@ -28,8 +29,19 @@ type Agent struct {
 	log       *slog.Logger
 }
 
-func New(c *Collector, sys *SystemCollector, r reporter, cfg Config, lg *slog.Logger) *Agent {
-	return &Agent{collector: c, system: sys, reporter: r, cfg: cfg, log: lg}
+// New rejects a config Run cannot serve: a ticker panics on a zero or negative interval, and with no
+// worker the reporter would wait forever for one to take its first snapshot.
+func New(c *Collector, sys *SystemCollector, r reporter, cfg Config, lg *slog.Logger) (*Agent, error) {
+	if cfg.PollInterval <= 0 {
+		return nil, fmt.Errorf("PollInterval must be positive, got %v", cfg.PollInterval)
+	}
+	if cfg.ReportInterval <= 0 {
+		return nil, fmt.Errorf("ReportInterval must be positive, got %v", cfg.ReportInterval)
+	}
+	if cfg.RateLimit <= 0 {
+		return nil, fmt.Errorf("RateLimit must be positive, got %d", cfg.RateLimit)
+	}
+	return &Agent{collector: c, system: sys, reporter: r, cfg: cfg, log: lg}, nil
 }
 
 // Run returns once ctx is done and every goroutine it started has returned.

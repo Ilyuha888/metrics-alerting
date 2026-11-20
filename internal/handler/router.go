@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Ilyuha888/metrics-alerting/internal/metrics"
@@ -31,9 +32,12 @@ type handlers struct {
 	storage Storage
 	db      Pinger
 	log     *slog.Logger
-	stamps  *stampGuard
 	keyed   bool
 	now     func() time.Time
+	// The two log-on-change states of trustedStamp. They are server-wide, since a request carries
+	// no agent identity.
+	clamping atomic.Bool
+	unsigned atomic.Bool
 }
 
 // NewRouter returns the routes; patterns alone answer 404 for a missing name, 405 for a wrong method.
@@ -42,7 +46,7 @@ func NewRouter(s Storage, db Pinger, lg *slog.Logger, key []byte) http.Handler {
 }
 
 func newRouter(s Storage, db Pinger, lg *slog.Logger, key []byte, now func() time.Time) http.Handler {
-	h := &handlers{storage: s, db: db, log: lg, stamps: newStampGuard(), keyed: len(key) > 0, now: now}
+	h := &handlers{storage: s, db: db, log: lg, keyed: len(key) > 0, now: now}
 
 	r := chi.NewRouter()
 	// Logging goes first, so it also records the 404s, 405s, signature and gzip rejections the rest
